@@ -1,80 +1,116 @@
 import os
 import json
+import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from data_loader import get_data_loaders
 from model import build_model
 
-def train_system(data_dir='preprocessed_soil_dataset', epochs=15, batch_size=32):
+def compute_class_weights(class_names, data_dir):
     """
-    Main training script.
+    Computes inverse-frequency class weights to counter imbalance.
+    Returns a dict {index: weight} for use in model.fit().
     """
-    
+    counts = []
+    for cls in class_names:
+        cls_dir = os.path.join(data_dir, 'train', cls)
+        counts.append(len(os.listdir(cls_dir)))
+    counts = np.array(counts, dtype=np.float32)
+    total  = counts.sum()
+    n_cls  = len(counts)
+    # sklearn-style: weight = total / (n_classes * count)
+    weights = total / (n_cls * counts)
+    print("\nClass weights (to counter imbalance):")
+    for i, (cls, w) in enumerate(zip(class_names, weights)):
+        print(f"  {cls:12}: {counts[i]:4.0f} samples  →  weight {w:.4f}")
+    return {i: float(w) for i, w in enumerate(weights)}
+
+
+def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32):
+    """
+    Main training script with class-weight balancing.
+    """
+
     # 1. Load Data
     print("Loading data...")
     train_ds, val_ds, test_ds, class_names = get_data_loaders(data_dir, batch_size=batch_size)
-    
+
     # Save class indices for prediction later
     class_indices = {name: i for i, name in enumerate(class_names)}
     with open('class_indices.json', 'w') as f:
         json.dump(class_indices, f)
-    
-    # 2. Build Model
-    print("Building model...")
+
+    # 2. Compute class weights from the raw (non-preprocessed) dataset counts
+    raw_dir = data_dir if os.path.exists(os.path.join(data_dir, 'train')) else 'soil_dataset'
+    class_weight = compute_class_weights(class_names, raw_dir)
+
+    # 3. Build Model
+    print("\nBuilding model...")
     model, base_model = build_model(num_classes=len(class_names))
-    
-    # 3. Compile Model (Initial Training)
-    model.compile(optimizer=Adam(learning_rate=0.001),
-                  loss='categorical_crossentropy',
-                  metrics=['accuracy'])
-    
-    # 4. Callbacks
+
+    # 4. Compile — Phase 1
+    model.compile(
+        optimizer=Adam(learning_rate=0.001),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    # 5. Callbacks
     callbacks = [
-        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-        ModelCheckpoint('soil_classifier_initial.keras', monitor='val_accuracy', save_best_only=True)
+        EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True, verbose=1),
+        ModelCheckpoint('soil_classifier_initial.keras', monitor='val_accuracy',
+                        save_best_only=True, verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3,
+                          min_lr=1e-6, verbose=1),
     ]
-    
-    # 5. Initial Training (Frozen Base)
-    print("Starting initial training...")
+
+    # 6. Phase 1 — frozen base
+    print("\nPhase 1: Training classification head (base frozen)...")
     history = model.fit(
         train_ds,
         epochs=epochs,
         validation_data=val_ds,
+        class_weight=class_weight,   # ← key fix
         callbacks=callbacks
     )
-    
-    # 6. Fine-tuning (Unfreeze top layers)
-    print("Starting fine-tuning...")
+
+    # 7. Phase 2 — fine-tune top layers
+    print("\nPhase 2: Fine-tuning top 30 MobileNetV2 layers...")
     base_model.trainable = True
-    
-    # Freeze all layers except the last 20
-    fine_tune_at = len(base_model.layers) - 20
+    fine_tune_at = len(base_model.layers) - 30   # was 20, now 30
     for layer in base_model.layers[:fine_tune_at]:
         layer.trainable = False
-        
-    # Recompile with a lower learning rate
-    model.compile(optimizer=Adam(learning_rate=0.0001),
-                  loss='categorical_crossentropy',
-                  metrics=['accuracy'])
-    
-    # Fine-tune
-    fine_tune_epochs = 10
+
+    model.compile(
+        optimizer=Adam(learning_rate=0.00005),   # lower than before (1e-4 → 5e-5)
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    fine_tune_epochs = 15
     total_epochs = epochs + fine_tune_epochs
-    
+
+    callbacks_ft = [
+        EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True, verbose=1),
+        ModelCheckpoint('soil_classifier_final.keras', monitor='val_accuracy',
+                        save_best_only=True, verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3,
+                          min_lr=1e-7, verbose=1),
+    ]
+
     history_fine = model.fit(
         train_ds,
         epochs=total_epochs,
         initial_epoch=history.epoch[-1],
         validation_data=val_ds,
-        callbacks=callbacks
+        class_weight=class_weight,   # ← key fix
+        callbacks=callbacks_ft
     )
-    
-    # 7. Save Final Model
+
     model.save('soil_classifier_final.keras')
-    print("Model saved as soil_classifier_final.keras")
-    
+    print("\nModel saved as soil_classifier_final.keras")
     return history, history_fine
 
 def plot_history(history, history_fine):

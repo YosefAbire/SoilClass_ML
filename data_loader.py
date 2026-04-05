@@ -1,28 +1,24 @@
 import tensorflow as tf
 from tensorflow.keras import layers
+import numpy as np
+import os
 
 def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32):
     """
     Creates training, validation, and test datasets using the tf.data.Dataset API.
-    
-    Args:
-        data_dir (str): Path to the dataset directory.
-        target_size (tuple): Dimensions to resize images.
-        batch_size (int): Number of images per batch.
-        
-    Returns:
-        train_ds, val_ds, test_ds, class_names
+    Minority classes (e.g. arid) are oversampled in the training set to reduce bias.
     """
-    
-    # Load datasets from directory
-    train_ds = tf.keras.utils.image_dataset_from_directory(
+
+    # ── Load raw datasets ────────────────────────────────────────────────────
+    train_ds_raw = tf.keras.utils.image_dataset_from_directory(
         f"{data_dir}/train",
         label_mode='categorical',
         image_size=target_size,
-        batch_size=batch_size,
-        shuffle=True
+        batch_size=None,          # unbatched — needed for per-class oversampling
+        shuffle=True,
+        seed=42
     )
-    
+
     val_ds = tf.keras.utils.image_dataset_from_directory(
         f"{data_dir}/validation",
         label_mode='categorical',
@@ -30,7 +26,7 @@ def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32):
         batch_size=batch_size,
         shuffle=False
     )
-    
+
     test_ds = tf.keras.utils.image_dataset_from_directory(
         f"{data_dir}/test",
         label_mode='categorical',
@@ -38,34 +34,72 @@ def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32):
         batch_size=batch_size,
         shuffle=False
     )
-    
-    class_names = train_ds.class_names
-    
-    # Data Augmentation Layer (to be applied to training data)
+
+    class_names = train_ds_raw.class_names
+    n_classes   = len(class_names)
+
+    # ── Count samples per class ───────────────────────────────────────────────
+    train_dir = f"{data_dir}/train"
+    counts = np.array([
+        len(os.listdir(os.path.join(train_dir, cls)))
+        for cls in class_names
+    ], dtype=np.float32)
+    max_count = counts.max()
+
+    # ── Build one dataset per class, then resample ───────────────────────────
+    class_datasets = []
+    for i, cls in enumerate(class_names):
+        # filter to this class
+        cls_ds = train_ds_raw.filter(
+            lambda x, y, idx=i: tf.equal(tf.argmax(y), idx)
+        )
+        # repeat minority classes so every class reaches ~max_count
+        repeat_factor = int(np.ceil(max_count / counts[i]))
+        if repeat_factor > 1:
+            cls_ds = cls_ds.repeat(repeat_factor)
+        class_datasets.append(cls_ds)
+
+    # sample_from_datasets interleaves all class streams uniformly
+    train_ds = tf.data.Dataset.sample_from_datasets(
+        class_datasets,
+        weights=[1.0 / n_classes] * n_classes,
+        seed=42
+    )
+
+    # ── Augmentation (training only) ─────────────────────────────────────────
     data_augmentation = tf.keras.Sequential([
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(0.2),
-        layers.RandomZoom(0.2),
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.25),
+        layers.RandomZoom(0.25),
         layers.RandomTranslation(0.1, 0.1),
+        layers.RandomBrightness(0.2),
+        layers.RandomContrast(0.2),
     ])
-    
-    # Preprocessing function: Rescale pixel values
-    def preprocess(image, label, augment=False):
+
+    def preprocess_train(image, label):
         image = tf.cast(image, tf.float32) / 255.0
-        if augment:
-            image = data_augmentation(image, training=True)
+        image = data_augmentation(image, training=True)
         return image, label
 
-    # Configure datasets for performance
+    def preprocess_eval(image, label):
+        image = tf.cast(image, tf.float32) / 255.0
+        return image, label
+
     AUTOTUNE = tf.data.AUTOTUNE
-    
-    train_ds = train_ds.map(lambda x, y: preprocess(x, y, augment=True), num_parallel_calls=AUTOTUNE)
-    train_ds = train_ds.cache().prefetch(buffer_size=AUTOTUNE)
-    
-    val_ds = val_ds.map(lambda x, y: preprocess(x, y), num_parallel_calls=AUTOTUNE)
-    val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
-    
-    test_ds = test_ds.map(lambda x, y: preprocess(x, y), num_parallel_calls=AUTOTUNE)
-    test_ds = test_ds.cache().prefetch(buffer_size=AUTOTUNE)
-    
+
+    train_ds = (train_ds
+                .map(preprocess_train, num_parallel_calls=AUTOTUNE)
+                .batch(batch_size)
+                .prefetch(AUTOTUNE))
+
+    val_ds = (val_ds
+              .map(preprocess_eval, num_parallel_calls=AUTOTUNE)
+              .cache()
+              .prefetch(AUTOTUNE))
+
+    test_ds = (test_ds
+               .map(preprocess_eval, num_parallel_calls=AUTOTUNE)
+               .cache()
+               .prefetch(AUTOTUNE))
+
     return train_ds, val_ds, test_ds, class_names
