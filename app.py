@@ -39,6 +39,50 @@ CLASS_COLORS = {
     'yellow':   '#C9A227',
 }
 
+# ── Crop recommendations per soil type ───────────────────────────────────────
+CROP_DATA = {
+    'alluvial': {
+        'description': 'Alluvial soil is highly fertile, well-drained, and rich in minerals deposited by rivers. It has good water retention and is ideal for a wide range of crops.',
+        'best_for': ['Rice', 'Wheat', 'Sugarcane', 'Cotton', 'Maize', 'Pulses', 'Oilseeds'],
+        'also_suitable': ['Vegetables', 'Fruits (Mango, Banana)', 'Jute', 'Tobacco'],
+        'avoid': ['Crops requiring very dry conditions'],
+        'tips': 'Maintain organic matter levels. Avoid waterlogging in low-lying areas. Excellent for double-cropping systems.',
+        'icon': '🌾',
+    },
+    'arid': {
+        'description': 'Arid soil is sandy, low in organic matter, and has poor water retention. It is found in dry and desert regions with low rainfall.',
+        'best_for': ['Millet (Bajra)', 'Sorghum', 'Barley', 'Drought-resistant Pulses', 'Groundnut'],
+        'also_suitable': ['Date Palm', 'Cactus crops', 'Drought-tolerant vegetables (Onion, Garlic)'],
+        'avoid': ['Water-intensive crops like Rice, Sugarcane'],
+        'tips': 'Use drip irrigation to conserve water. Add organic compost to improve fertility. Mulching helps retain soil moisture.',
+        'icon': '🌵',
+    },
+    'black': {
+        'description': 'Black soil (Regur) is rich in calcium, magnesium, and iron. It has high water retention capacity and swells when wet, making it ideal for rain-fed crops.',
+        'best_for': ['Cotton', 'Soybean', 'Sorghum', 'Wheat', 'Sunflower', 'Chickpea'],
+        'also_suitable': ['Citrus fruits', 'Tobacco', 'Linseed', 'Millets'],
+        'avoid': ['Crops sensitive to waterlogging during monsoon'],
+        'tips': 'Deep ploughing improves aeration. Avoid over-irrigation — the soil retains moisture well. Ideal for cotton cultivation.',
+        'icon': '🌻',
+    },
+    'red': {
+        'description': 'Red soil is rich in iron oxide, giving it a reddish color. It is generally low in nitrogen and organic matter but responds well to fertilization.',
+        'best_for': ['Groundnut', 'Pulses', 'Millets', 'Tobacco', 'Potato', 'Maize'],
+        'also_suitable': ['Fruits (Mango, Citrus)', 'Vegetables', 'Oilseeds', 'Cotton'],
+        'avoid': ['Crops needing high nitrogen without supplementation'],
+        'tips': 'Apply nitrogen-rich fertilizers or compost. Lime application helps correct acidity. Good drainage makes it suitable for root crops.',
+        'icon': '🥜',
+    },
+    'yellow': {
+        'description': 'Yellow soil contains iron in hydrated form, giving it a yellow tint. It is moderately fertile and found in areas with moderate rainfall.',
+        'best_for': ['Rice', 'Maize', 'Groundnut', 'Pulses', 'Sweet Potato'],
+        'also_suitable': ['Vegetables', 'Fruits', 'Millets', 'Oilseeds'],
+        'avoid': ['Crops requiring very high fertility without amendment'],
+        'tips': 'Enrich with organic matter and phosphorus fertilizers. Good for mixed farming. Responds well to green manuring.',
+        'icon': '🌽',
+    },
+}
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="SoilClass ML",
@@ -315,6 +359,11 @@ elif page == "🔍  Classify Image":
 
     uploaded = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
 
+    # clear result when a new image is uploaded
+    if uploaded and st.session_state.get('last_upload') != uploaded.name:
+        st.session_state.pop('soil_result', None)
+        st.session_state['last_upload'] = uploaded.name
+
     if uploaded:
         img = Image.open(uploaded)
         col1, col2 = st.columns([1, 1], gap="large")
@@ -331,18 +380,24 @@ elif page == "🔍  Classify Image":
                         arr    = np.array(img.convert('RGB').resize((224, 224)), dtype=np.float32) / 255.0
                         probs  = model.predict(np.expand_dims(arr, 0), verbose=0)[0]
                         idx    = int(np.argmax(probs))
-                        pred_class = labels[idx]
-                        confidence = float(probs[idx])
-                        all_probs  = {labels[i]: float(p) for i, p in enumerate(probs)}
+                        st.session_state['soil_result'] = {
+                            'pred_class': labels[idx],
+                            'confidence': float(probs[idx]),
+                            'all_probs':  {labels[i]: float(p) for i, p in enumerate(probs)}
+                        }
                     except Exception as e:
                         st.error(f"Inference failed: {e}")
                         st.stop()
 
-                conf_pct  = confidence * 100
-                cls_color = CLASS_COLORS.get(pred_class, PRIMARY)
-                bar_color = SUCCESS if conf_pct >= 70 else ACCENT if conf_pct >= 40 else DANGER
+            result = st.session_state.get('soil_result')
+            if result:
+                pred_class = result['pred_class']
+                confidence = result['confidence']
+                all_probs  = result['all_probs']
+                conf_pct   = confidence * 100
+                cls_color  = CLASS_COLORS.get(pred_class, PRIMARY)
+                bar_color  = SUCCESS if conf_pct >= 70 else ACCENT if conf_pct >= 40 else DANGER
 
-                # Result card
                 st.markdown(f"""
 <div style="background:{CARD};border:1.5px solid {BORDER};border-radius:14px;
             padding:22px 24px;margin-bottom:18px;box-shadow:0 2px 10px rgba(0,0,0,0.08)">
@@ -363,10 +418,61 @@ elif page == "🔍  Classify Image":
                 for cls, prob in sorted(all_probs.items(), key=lambda x: x[1], reverse=True):
                     is_top = cls == pred_class
                     lc, bc = st.columns([3, 7])
-                    label_color = PRIMARY if is_top else MUTED
-                    weight = "800" if is_top else "500"
-                    lc.markdown(f"<span style='color:{label_color};font-weight:{weight};font-size:14px'>{cls.capitalize()}</span>", unsafe_allow_html=True)
+                    lc.markdown(
+                        f"<span style='color:{PRIMARY if is_top else MUTED};"
+                        f"font-weight:{'800' if is_top else '500'};font-size:14px'>"
+                        f"{cls.capitalize()}</span>", unsafe_allow_html=True)
                     bc.progress(prob, text=f"{prob*100:.1f}%")
+
+        # ── Crop recommendations (full width, below both columns) ─────────────
+        result = st.session_state.get('soil_result')
+        if result:
+            pred_class = result['pred_class']
+            crop       = CROP_DATA.get(pred_class, {})
+            cls_color  = CLASS_COLORS.get(pred_class, PRIMARY)
+
+            st.divider()
+            st.markdown(
+                f"<h3 style='color:{cls_color}'>{crop.get('icon','')} "
+                f"Crop Recommendations for {pred_class.capitalize()} Soil</h3>",
+                unsafe_allow_html=True)
+            st.markdown(
+                f"<p style='color:{MUTED};font-size:14px'>{crop.get('description','')}</p>",
+                unsafe_allow_html=True)
+
+            ca, cb, cc = st.columns(3, gap="medium")
+            with ca:
+                st.markdown(
+                    f"<div style='background:{CARD};border:1px solid {BORDER};border-radius:12px;padding:16px'>"
+                    f"<p style='color:{SUCCESS};font-weight:700;font-size:13px;text-transform:uppercase;"
+                    f"letter-spacing:.06em;margin-bottom:8px'>✅ Best Crops</p>"
+                    + "".join(f"<p style='color:{TEXT};margin:4px 0;font-size:14px'>• {c}</p>"
+                              for c in crop.get('best_for', []))
+                    + "</div>", unsafe_allow_html=True)
+            with cb:
+                st.markdown(
+                    f"<div style='background:{CARD};border:1px solid {BORDER};border-radius:12px;padding:16px'>"
+                    f"<p style='color:{ACCENT};font-weight:700;font-size:13px;text-transform:uppercase;"
+                    f"letter-spacing:.06em;margin-bottom:8px'>🌿 Also Suitable</p>"
+                    + "".join(f"<p style='color:{TEXT};margin:4px 0;font-size:14px'>• {c}</p>"
+                              for c in crop.get('also_suitable', []))
+                    + "</div>", unsafe_allow_html=True)
+            with cc:
+                st.markdown(
+                    f"<div style='background:{CARD};border:1px solid {BORDER};border-radius:12px;padding:16px'>"
+                    f"<p style='color:{DANGER};font-weight:700;font-size:13px;text-transform:uppercase;"
+                    f"letter-spacing:.06em;margin-bottom:8px'>⚠️ Avoid</p>"
+                    + "".join(f"<p style='color:{TEXT};margin:4px 0;font-size:14px'>• {c}</p>"
+                              for c in crop.get('avoid', []))
+                    + "</div>", unsafe_allow_html=True)
+
+            st.markdown(f"""
+<div style='background:#F0F7F1;border-left:4px solid {SUCCESS};border-radius:0 10px 10px 0;
+            padding:14px 18px;margin-top:16px'>
+  <p style='color:{SUCCESS};font-weight:700;font-size:13px;margin:0 0 4px'>💡 Farming Tips</p>
+  <p style='color:{TEXT};font-size:14px;margin:0'>{crop.get('tips', '')}</p>
+</div>
+""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EVALUATION
