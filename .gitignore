@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv
+venv/
+
+# Models (large binary files)
+*.keras
+*.h5
+
+# Dataset (large image folders)
+soil_dataset/
+preprocessed_soil_dataset/
+.tmp/
+
+# Logs / outputs
+*.log
+training_plots.png
+confusion_matrix.png
+
+# OS
+.DS_Store
+Thumbs.db
