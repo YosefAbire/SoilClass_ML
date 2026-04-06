@@ -36,7 +36,7 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
     # 1. Load Data
     print("Loading data...")
     train_ds, val_ds, test_ds, class_names = get_data_loaders(data_dir, batch_size=batch_size)
-
+    
     # Save class indices for prediction later
     class_indices = {name: i for i, name in enumerate(class_names)}
     with open('class_indices.json', 'w') as f:
@@ -96,22 +96,7 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
         EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True, verbose=1),
         ModelCheckpoint('soil_classifier_final.keras', monitor='val_accuracy',
                         save_best_only=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3,
-                          min_lr=1e-7, verbose=1),
-    ]
-
-    history_fine = model.fit(
-        train_ds,
-        epochs=total_epochs,
-        initial_epoch=history.epoch[-1],
-        validation_data=val_ds,
-        class_weight=class_weight,   # ← key fix
-        callbacks=callbacks_ft
-    )
-
-    model.save('soil_classifier_final.keras')
-    print("\nModel saved as soil_classifier_final.keras")
-    return history, history_fine
+        ReduceLROnPlateau(monitor='va
 
 def plot_history(history, history_fine):
     """

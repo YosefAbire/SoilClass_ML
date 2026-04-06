@@ -285,6 +285,7 @@ with st.sidebar:
         "🔍  Classify Image",
         "📊  Evaluation",
         "📁  Dataset",
+        "⚙️  Hyperparameters",
     ])
     st.divider()
     st.markdown("<p style='color:#E8C99A;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px'>Model</p>", unsafe_allow_html=True)
@@ -679,3 +680,174 @@ elif page == "📁  Dataset":
         if imgs:
             col.image(os.path.join(cls_dir, imgs[0]), use_container_width=True)
             col.markdown(f"<p style='text-align:center;color:{CLASS_COLORS.get(cls,PRIMARY)};font-weight:700;font-size:13px'>{cls.capitalize()}</p>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HYPERPARAMETERS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "⚙️  Hyperparameters":
+    st.title("⚙️ Hyperparameters & Metrics")
+    st.markdown(f"<p style='color:{MUTED}'>All training configuration used in this project, evaluation metrics tracked, and suggested improvements for future experiments.</p>", unsafe_allow_html=True)
+
+    # ── helper to render a section card ──────────────────────────────────────
+    def section(title, color=PRIMARY):
+        st.markdown(f"<h3 style='color:{color};margin-top:8px'>{title}</h3>", unsafe_allow_html=True)
+
+    def badge(label, value, note="", color=PRIMARY):
+        note_html = f"<span style='color:{MUTED};font-size:12px;margin-left:8px'>{note}</span>" if note else ""
+        st.markdown(
+            f"<div style='background:{CARD};border:1px solid {BORDER};border-radius:10px;"
+            f"padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px'>"
+            f"<span style='color:{MUTED};font-size:13px;min-width:220px'>{label}</span>"
+            f"<code style='background:#EDE3D8;color:{color};font-size:13px;font-weight:700;"
+            f"padding:3px 10px;border-radius:6px'>{value}</code>"
+            f"{note_html}</div>",
+            unsafe_allow_html=True)
+
+    def suggest(label, value, reason):
+        st.markdown(
+            f"<div style='background:#FFFBF5;border:1px dashed {ACCENT};border-radius:10px;"
+            f"padding:12px 16px;margin-bottom:8px'>"
+            f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>"
+            f"<span style='color:{MUTED};font-size:13px;min-width:220px'>{label}</span>"
+            f"<code style='background:#FFF0D6;color:{ACCENT};font-size:13px;font-weight:700;"
+            f"padding:3px 10px;border-radius:6px'>{value}</code>"
+            f"<span style='color:#888;font-size:11px;font-weight:700;text-transform:uppercase;"
+            f"letter-spacing:.06em'>suggested</span></div>"
+            f"<p style='color:{MUTED};font-size:12px;margin:0;padding-left:4px'>💡 {reason}</p>"
+            f"</div>",
+            unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── 1. Model Architecture ─────────────────────────────────────────────────
+    section("🏗️ Model Architecture")
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        badge("Base model",          "MobileNetV2",          "pre-trained on ImageNet")
+        badge("Input shape",         "224 × 224 × 3")
+        badge("Custom head — Dense", "128 units",            "ReLU activation")
+        badge("Dropout rate",        "0.5",                  "applied after Dense(128)")
+        badge("Output units",        "5",                    "Softmax — one per class")
+        badge("Fine-tune layers",    "top 20 of MobileNetV2","rest remain frozen")
+    with col2:
+        suggest("Dense units",    "256 or 512",   "Larger head may capture more complex soil features")
+        suggest("Dropout rate",   "0.3 – 0.4",    "Lower dropout if model underfits on small classes (arid)")
+        suggest("Extra Dense",    "Dense(64) after Dense(128)", "Adds depth before output; try with BatchNorm")
+        suggest("Fine-tune layers","top 30 – 40", "Unfreeze more layers for domain-specific fine-tuning")
+        suggest("Base model",     "EfficientNetB0 / B2", "Higher accuracy at similar or lower parameter count")
+
+    st.divider()
+
+    # ── 2. Training Phase 1 ───────────────────────────────────────────────────
+    section("🔵 Phase 1 — Initial Training (Frozen Base)")
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        badge("Optimizer",        "Adam")
+        badge("Learning rate",    "0.001")
+        badge("Loss function",    "Categorical Cross-Entropy")
+        badge("Metrics tracked",  "accuracy")
+        badge("Max epochs",       "15")
+        badge("Batch size",       "32")
+        badge("EarlyStopping",    "patience = 5",   "monitors val_loss")
+        badge("ModelCheckpoint",  "val_accuracy",   "saves best only → soil_classifier_initial.keras")
+    with col2:
+        suggest("Learning rate",  "0.0005",         "Slower start can improve convergence stability")
+        suggest("Batch size",     "64",             "Larger batch = smoother gradients if GPU memory allows")
+        suggest("LR scheduler",   "ReduceLROnPlateau", "Automatically reduce LR when val_loss plateaus")
+        suggest("Metrics",        "+ val_top_2_accuracy", "Useful when classes are visually similar")
+        suggest("EarlyStopping patience", "7 – 10", "Give model more time before stopping")
+
+    st.divider()
+
+    # ── 3. Training Phase 2 ───────────────────────────────────────────────────
+    section("🟠 Phase 2 — Fine-Tuning (Top 20 Layers Unfrozen)")
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        badge("Optimizer",        "Adam")
+        badge("Learning rate",    "0.0001",         "10× lower than Phase 1")
+        badge("Loss function",    "Categorical Cross-Entropy")
+        badge("Fine-tune epochs", "10")
+        badge("Batch size",       "32")
+        badge("ModelCheckpoint",  "val_accuracy",   "saves best only → soil_classifier_final.keras")
+    with col2:
+        suggest("Optimizer",      "SGD + momentum 0.9", "Often outperforms Adam in fine-tuning stage")
+        suggest("Learning rate",  "1e-5 with warmup",   "Cosine decay or linear warmup prevents catastrophic forgetting")
+        suggest("Mixed precision","float16 + float32",  "Speeds up training on modern GPUs with minimal accuracy loss")
+        suggest("Gradient clipping", "clipnorm=1.0",    "Stabilises fine-tuning when unfreezing many layers")
+
+    st.divider()
+
+    # ── 4. Data Augmentation ──────────────────────────────────────────────────
+    section("🖼️ Data Augmentation (Training Only)")
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        badge("RandomFlip",        "horizontal")
+        badge("RandomRotation",    "± 20°  (factor=0.2)")
+        badge("RandomZoom",        "± 20%  (factor=0.2)")
+        badge("RandomTranslation", "± 10%  (height & width)")
+        badge("Normalisation",     "÷ 255.0",        "pixel values scaled to [0, 1]")
+    with col2:
+        suggest("RandomBrightness",  "factor=0.2",   "Soil images vary in lighting conditions")
+        suggest("RandomContrast",    "factor=0.2",   "Helps generalise across different camera settings")
+        suggest("RandomSaturation",  "factor=0.3",   "Colour variation is key for soil type distinction")
+        suggest("CutMix / MixUp",    "alpha=0.2",    "Advanced augmentation; reduces overfitting significantly")
+        suggest("Gaussian noise",    "stddev=0.01",  "Simulates sensor noise in field photography")
+
+    st.divider()
+
+    # ── 5. Preprocessing ──────────────────────────────────────────────────────
+    section("🔬 Preprocessing Pipeline")
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        badge("Histogram Equalization", "PIL ImageOps.equalize", "improves contrast")
+        badge("Gaussian Blur",          "radius = 1.0",          "reduces noise")
+        badge("Image resize",           "224 × 224 px")
+        badge("Colour mode",            "RGB")
+    with col2:
+        suggest("CLAHE",              "Contrast Limited AHE",  "Better than global equalization for uneven lighting")
+        suggest("Sharpening filter",  "UnsharpMask",           "Enhances soil texture edges")
+        suggest("Standardisation",    "mean=0, std=1 per channel", "ImageNet-style normalisation instead of ÷255")
+
+    st.divider()
+
+    # ── 6. Evaluation Metrics ─────────────────────────────────────────────────
+    section("📏 Evaluation Metrics", color=SUCCESS)
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        st.markdown(f"<p style='color:{MUTED};font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px'>Currently Tracked</p>", unsafe_allow_html=True)
+        badge("Accuracy",           "correct / total",        "overall test-set accuracy")
+        badge("Loss",               "Categorical Cross-Entropy", "lower = better")
+        badge("Precision (per class)", "TP / (TP + FP)",      "how many predicted positives are correct")
+        badge("Recall (per class)", "TP / (TP + FN)",         "how many actual positives are found")
+        badge("F1-Score (per class)","2 × P × R / (P + R)",  "harmonic mean of precision & recall")
+        badge("Macro F1",           "unweighted mean F1",     "treats all classes equally")
+        badge("Weighted F1",        "support-weighted mean",  "accounts for class imbalance")
+        badge("Confusion Matrix",   "raw counts",             "shows misclassification patterns")
+        badge("Normalised CM",      "row-normalised",         "per-class recall at a glance")
+    with col2:
+        st.markdown(f"<p style='color:{MUTED};font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px'>Suggested for Future</p>", unsafe_allow_html=True)
+        suggest("Top-2 Accuracy",   "—",  "Useful when two soil types are visually similar (e.g. red vs. yellow)")
+        suggest("ROC-AUC (per class)", "One-vs-Rest", "Measures discriminability independent of threshold")
+        suggest("Cohen's Kappa",    "κ score",        "Measures agreement beyond chance; good for imbalanced classes")
+        suggest("Matthews Correlation Coefficient", "MCC", "More informative than F1 for imbalanced datasets")
+        suggest("Calibration curve","reliability diagram", "Checks if confidence scores are well-calibrated")
+        suggest("Grad-CAM",         "visual explanation",  "Heatmap showing which image regions drove the prediction")
+
+    st.divider()
+
+    # ── 7. Future experiments summary ────────────────────────────────────────
+    st.markdown(f"""
+<div style='background:#FFFBF5;border:1.5px solid {ACCENT};border-radius:14px;padding:20px 24px'>
+  <p style='color:{ACCENT};font-weight:800;font-size:14px;text-transform:uppercase;
+            letter-spacing:.08em;margin:0 0 10px'>🚀 Recommended Next Experiments</p>
+  <ol style='color:{TEXT};font-size:14px;line-height:2;margin:0;padding-left:20px'>
+    <li>Replace MobileNetV2 with <strong>EfficientNetB2</strong> — better accuracy/param tradeoff</li>
+    <li>Add <strong>class weights</strong> to loss to handle imbalance (arid has only ~200 train images)</li>
+    <li>Try <strong>CutMix / MixUp</strong> augmentation to reduce overfitting on minority classes</li>
+    <li>Use <strong>ReduceLROnPlateau</strong> callback instead of fixed LR in Phase 2</li>
+    <li>Add <strong>Grad-CAM</strong> visualisation in the Classify page to explain predictions</li>
+    <li>Experiment with <strong>label smoothing</strong> (ε=0.1) in the loss function</li>
+    <li>Run <strong>k-fold cross-validation</strong> for more reliable performance estimates</li>
+  </ol>
+</div>
+""", unsafe_allow_html=True)
