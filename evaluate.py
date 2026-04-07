@@ -4,6 +4,7 @@ import seaborn as sns
 import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 from data_loader import get_data_loaders
+from losses import FocalLoss  # must be imported so Keras can deserialise the saved model
 
 def evaluate_model(model_path='soil_classifier_final.keras', data_dir='soil_dataset'):
     """

@@ -8,6 +8,7 @@ import shutil
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
+from losses import FocalLoss  # required for deserialising the saved model
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

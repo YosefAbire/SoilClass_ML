@@ -7,6 +7,7 @@ import json
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
 from tensorflow.keras.preprocessing import image
+from losses import FocalLoss  # required for deserialising the saved model
 
 def predict_image(image_path, model_path='soil_classifier_final.keras', class_indices_path='class_indices.json'):
     """
