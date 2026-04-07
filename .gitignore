@@ -14,6 +14,8 @@ venv/
 soil_dataset/
 preprocessed_soil_dataset/
 .tmp/
+FUNCTIONS_AND_MATH.md/
+ACCURACY_DIAGNOSIS.md/
 
 # Logs / outputs
 *.log

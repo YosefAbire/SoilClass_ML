@@ -56,16 +56,16 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
     with open('class_indices.json', 'w') as f:
         json.dump(class_indices, f)
 
-    # 2. Class weights
-    raw_dir = data_dir if os.path.exists(os.path.join(data_dir, 'train')) else 'soil_dataset'
-    class_weight = compute_class_weights(class_names, raw_dir)
+    # 2. Class weights — removed (Focal Loss handles imbalance; double-counting
+    #    caused gradient instability). Kept compute_class_weights() for reference.
+    # class_weight = compute_class_weights(class_names, raw_dir)
 
     # 3. Build model
     print("\nBuilding model...")
     model, base_model = build_model(num_classes=len(class_names))
 
-    # 4. Focal loss instance (gamma=2.0, alpha=0.25)
-    focal_loss = FocalLoss(gamma=2.0, alpha=0.25)
+    # 4. Focal loss — alpha=1.0 for multi-class (0.25 was binary-detection default)
+    focal_loss = FocalLoss(gamma=2.0, alpha=1.0)
 
     # ── Phase 1: train head, base frozen ─────────────────────────────────────
     model.compile(
@@ -75,12 +75,13 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
     )
 
     callbacks_p1 = [
-        EarlyStopping(monitor='val_loss', patience=6,
-                      restore_best_weights=True, verbose=1),
+        # Monitor val_accuracy — more meaningful than val_loss with Focal Loss
+        EarlyStopping(monitor='val_accuracy', patience=7,
+                      restore_best_weights=True, verbose=1, min_delta=1e-3),
         ModelCheckpoint('soil_classifier_initial.keras', monitor='val_accuracy',
                         save_best_only=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3,
-                          min_lr=1e-6, verbose=1),
+        ReduceLROnPlateau(monitor='val_accuracy', factor=0.5, patience=3,
+                          min_lr=1e-6, verbose=1, mode='max'),
     ]
 
     print("\nPhase 1: Training classification head (base frozen)...")
@@ -88,7 +89,8 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
         train_ds,
         epochs=epochs,
         validation_data=val_ds,
-        class_weight=class_weight,
+        # NOTE: class_weight removed — Focal Loss already handles imbalance.
+        # Using both caused double-counting and gradient instability.
         callbacks=callbacks_p1
     )
 
@@ -99,9 +101,9 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
     for layer in base_model.layers[:fine_tune_at]:
         layer.trainable = False
 
-    # LR lowered from 5e-5 → 1e-5 to avoid jumping over the solution
+    # Phase 2 LR raised back to 5e-5 now that alpha=1.0 (no more 0.25 scaling)
     model.compile(
-        optimizer=Adam(learning_rate=0.00001),
+        optimizer=Adam(learning_rate=0.00005),
         loss=focal_loss,
         metrics=['accuracy']
     )
@@ -109,14 +111,13 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
     fine_tune_epochs = 15
     total_epochs     = epochs + fine_tune_epochs
 
-    # patience increased to 10 to give Yellow/Red more time to converge
     callbacks_p2 = [
-        EarlyStopping(monitor='val_loss', patience=10,
-                      restore_best_weights=True, verbose=1),
+        EarlyStopping(monitor='val_accuracy', patience=10,
+                      restore_best_weights=True, verbose=1, min_delta=1e-3),
         ModelCheckpoint('soil_classifier_final.keras', monitor='val_accuracy',
                         save_best_only=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=4,
-                          min_lr=1e-8, verbose=1),
+        ReduceLROnPlateau(monitor='val_accuracy', factor=0.5, patience=4,
+                          min_lr=1e-8, verbose=1, mode='max'),
     ]
 
     history_fine = model.fit(
@@ -124,7 +125,7 @@ def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32)
         epochs=total_epochs,
         initial_epoch=history.epoch[-1],
         validation_data=val_ds,
-        class_weight=class_weight,
+        # No class_weight — Focal Loss handles imbalance
         callbacks=callbacks_p2
     )
 
