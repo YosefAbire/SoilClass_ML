@@ -1,19 +1,11 @@
 import tensorflow as tf
 
 
-@tf.keras.utils.register_keras_serializable(package='SoilClassML')
 class FocalLoss(tf.keras.losses.Loss):
     """
     Focal Loss for multi-class classification.
 
     FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
-
-    The modulating factor (1 - p_t)^gamma down-weights easy examples
-    so the optimiser focuses on hard / misclassified samples.
-
-    Args:
-        gamma (float): Focusing parameter. gamma=0 reduces to cross-entropy.
-        alpha (float): Overall loss scale factor.
     """
     def __init__(self, gamma=2.0, alpha=0.25, **kwargs):
         super().__init__(**kwargs)
@@ -31,3 +23,7 @@ class FocalLoss(tf.keras.losses.Loss):
         config = super().get_config()
         config.update({'gamma': self.gamma, 'alpha': self.alpha})
         return config
+
+
+# Pass this to every tf.keras.models.load_model() call
+CUSTOM_OBJECTS = {'FocalLoss': FocalLoss}

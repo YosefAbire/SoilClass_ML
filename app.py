@@ -246,7 +246,7 @@ def load_model():
         if not os.path.exists(h5):
             shutil.copy2(path, h5)
         path = h5
-    return tf.keras.models.load_model(path)
+    return tf.keras.models.load_model(path, custom_objects={'FocalLoss': FocalLoss})
 
 @st.cache_data
 def load_labels() -> dict:

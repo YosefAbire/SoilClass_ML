@@ -27,7 +27,7 @@ def predict_image(image_path, model_path='soil_classifier_final.keras', class_in
     """
     
     # 1. Load Model
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_path, custom_objects={'FocalLoss': FocalLoss})
     
     # 2. Load Class Indices
     with open(class_indices_path, 'r') as f:

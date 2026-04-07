@@ -13,7 +13,7 @@ def evaluate_model(model_path='soil_classifier_final.keras', data_dir='soil_data
     
     # 1. Load Model
     print("Loading model...")
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_path, custom_objects={'FocalLoss': FocalLoss})
     
     # 2. Load Test Data
     _, _, test_ds, class_labels = get_data_loaders(data_dir)
