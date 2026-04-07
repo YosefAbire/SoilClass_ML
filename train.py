@@ -8,23 +8,40 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLRO
 from data_loader import get_data_loaders
 from model import build_model
 
-def compute_class_weights(class_names, data_dir):
+def compute_class_weights(class_names, data_dir, max_weight=2.0):
     """
-    Computes inverse-frequency class weights to counter imbalance.
+    Computes logarithmic-smoothed class weights to counter imbalance
+    without over-penalising minority classes.
+
+    Formula:
+        w_i = log(N_total) / log(N_i)
+
+    Raw weights are then normalised so the mean equals 1.0, and each
+    weight is capped at max_weight (default 2.0) to prevent the Arid
+    class from dominating the loss.
+
     Returns a dict {index: weight} for use in model.fit().
     """
     counts = []
     for cls in class_names:
         cls_dir = os.path.join(data_dir, 'train', cls)
         counts.append(len(os.listdir(cls_dir)))
-    counts = np.array(counts, dtype=np.float32)
-    total  = counts.sum()
-    n_cls  = len(counts)
-    # sklearn-style: weight = total / (n_classes * count)
-    weights = total / (n_cls * counts)
-    print("\nClass weights (to counter imbalance):")
+    counts  = np.array(counts, dtype=np.float32)
+    total   = counts.sum()
+
+    # Logarithmic smoothing: w_i = log(N_total) / log(N_i)
+    weights = np.log(total) / np.log(counts)
+
+    # Normalise so mean weight == 1.0 (keeps loss scale stable)
+    weights = weights / weights.mean()
+
+    # Cap to prevent any single class from being too aggressive
+    weights = np.clip(weights, a_min=None, a_max=max_weight)
+
+    print("\nClass weights (log-smoothed, capped at {:.1f}):".format(max_weight))
     for i, (cls, w) in enumerate(zip(class_names, weights)):
         print(f"  {cls:12}: {counts[i]:4.0f} samples  →  weight {w:.4f}")
+
     return {i: float(w) for i, w in enumerate(weights)}
 
 

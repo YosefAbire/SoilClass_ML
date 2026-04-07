@@ -71,25 +71,35 @@ Normalises pixel values only — no augmentation for validation/test.
 
 ## train.py
 
-### `compute_class_weights(class_names, data_dir)`
+### `compute_class_weights(class_names, data_dir, max_weight=2.0)`
 
-Computes inverse-frequency class weights to penalise misclassification of minority classes more heavily in the loss.
+Computes logarithmic-smoothed class weights to penalise misclassification of minority classes without making the arid weight too aggressive.
 
 | Parameter | Description |
 |---|---|
 | `class_names` | List of class name strings |
 | `data_dir` | Root dataset directory (uses `train/` subfolder) |
+| `max_weight` | Hard cap on any single class weight (default `2.0`) |
 
 **Formula used:**
 
 ```
-weight_i = N_total / (N_classes × N_i)
+w_i = log(N_total) / log(N_i)
 ```
 
-Where:
-- `N_total` = total training samples across all classes
-- `N_classes` = number of classes (5)
-- `N_i` = number of training samples for class i
+Then normalised so the mean weight equals 1.0:
+
+```
+w_i = w_i / mean(w)
+```
+
+Then capped:
+
+```
+w_i = min(w_i, max_weight)
+```
+
+This is gentler than inverse-frequency (`N_total / N_classes × N_i`) — the log scale compresses the ratio so minority classes get a meaningful boost without dominating the loss.
 
 **Returns:** `dict {class_index: weight}` — passed directly to `model.fit(class_weight=...)`
 
@@ -284,25 +294,36 @@ Where `w_i = N_total / (N_classes × N_i)` — minority classes get higher weigh
 
 ---
 
-### 5. Inverse-Frequency Class Weights
+### 5. Logarithmic-Smoothed Class Weights
 
-Used to counter class imbalance (arid: 200 samples vs yellow: 980):
+Used to counter class imbalance (arid: 200 samples vs yellow: 980) without making the minority weight too aggressive:
 
+**Step 1 — Log smoothing:**
 ```
-w_i = N_total / (N_classes × N_i)
+w_i = log(N_total) / log(N_i)
 ```
 
-Example with actual counts:
+**Step 2 — Normalise (mean = 1.0):**
+```
+w_i = w_i / mean(w)
+```
 
-| Class | N_i | Weight |
-|---|---|---|
-| alluvial | 487 | ~0.72 |
-| arid | 200 | ~1.75 |
-| black | 823 | ~0.43 |
-| red | 790 | ~0.44 |
-| yellow | 980 | ~0.36 |
+**Step 3 — Cap at max_weight = 2.0:**
+```
+w_i = min(w_i, 2.0)
+```
 
-Arid gets ~4× more weight than yellow — misclassifying it costs more in the loss.
+Comparison with raw inverse-frequency on actual counts:
+
+| Class | N_i | Inverse-freq weight | Log-smoothed weight (capped) |
+|---|---|---|---|
+| alluvial | 487 | ~0.72 | ~0.95 |
+| arid | 200 | ~1.75 | ~2.00 (capped) |
+| black | 823 | ~0.43 | ~0.88 |
+| red | 790 | ~0.44 | ~0.89 |
+| yellow | 980 | ~0.36 | ~0.85 |
+
+The log formula compresses the ratio — arid gets a meaningful boost but is capped at 2.0 instead of reaching ~4× with raw inverse-frequency.
 
 ---
 
