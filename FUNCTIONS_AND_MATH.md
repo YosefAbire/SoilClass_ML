@@ -111,14 +111,16 @@ Orchestrates the full two-phase training pipeline.
 
 **Phase 1 — Head training (base frozen):**
 - Optimizer: Adam, lr = 0.001
-- Loss: Categorical Cross-Entropy
+- Loss: **Focal Loss** (gamma=2.0, alpha=0.25)
 - Max epochs: 20
 - Callbacks: EarlyStopping (patience=6), ModelCheckpoint, ReduceLROnPlateau (factor=0.5, patience=3)
 - Class weights applied
 
 **Phase 2 — Fine-tuning (top 30 MobileNetV2 layers unfrozen):**
-- Optimizer: Adam, lr = 0.00005
-- Same loss and callbacks
+- Optimizer: Adam, lr = **0.00001** (lowered from 5e-5 to avoid overshooting)
+- Loss: **Focal Loss** (same instance)
+- EarlyStopping patience increased to **10** to give Yellow/Red more convergence time
+- ReduceLROnPlateau patience=4, min_lr=1e-8
 - Class weights applied
 - Fine-tune epochs: 15
 
@@ -274,7 +276,7 @@ All outputs sum to 1.0. The class with the highest value is the prediction.
 
 ### 4. Categorical Cross-Entropy Loss
 
-The training loss function. Measures how far the predicted probability distribution is from the true one-hot label:
+The base loss concept. Measures how far the predicted probability distribution is from the true one-hot label:
 
 ```
 L = -Σ y_i × log(ŷ_i)   for i = 1..5
@@ -284,13 +286,34 @@ Where:
 - `y_i` = true label (1 for correct class, 0 for others)
 - `ŷ_i` = predicted probability for class i
 
+### 4a. Focal Loss (used in this project)
+
+Extends cross-entropy with a modulating factor that down-weights easy examples and forces the optimiser to focus on hard / misclassified samples (Yellow, Red):
+
+```
+FL(p_t) = -alpha × (1 - p_t)^gamma × log(p_t)
+```
+
+Where:
+- `p_t` = predicted probability for the **true** class = `Σ y_i × ŷ_i`
+- `gamma = 2.0` — focusing parameter; higher = more focus on hard examples
+- `alpha = 0.25` — overall loss scale factor
+
+**How the modulating factor works:**
+
+| Scenario | p_t | (1 - p_t)^2 | Effect |
+|---|---|---|---|
+| Model is confident and correct | 0.95 | 0.0025 | Loss nearly zeroed — easy example ignored |
+| Model is uncertain | 0.50 | 0.25 | Moderate contribution |
+| Model is wrong (e.g. Yellow predicted as Red) | 0.05 | 0.9025 | Full weight — hard example dominates |
+
+When `gamma=0`, Focal Loss reduces exactly to standard cross-entropy.
+
 With class weights applied:
 
 ```
-L_weighted = -Σ w_i × y_i × log(ŷ_i)
+FL_weighted = -w_i × alpha × (1 - p_t)^gamma × log(p_t)
 ```
-
-Where `w_i = N_total / (N_classes × N_i)` — minority classes get higher weight.
 
 ---
 
