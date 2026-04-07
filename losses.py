@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 
-@tf.keras.saving.register_keras_serializable()
+@tf.keras.utils.register_keras_serializable(package='SoilClassML')
 class FocalLoss(tf.keras.losses.Loss):
     """
     Focal Loss for multi-class classification.
