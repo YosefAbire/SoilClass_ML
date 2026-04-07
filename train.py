@@ -1,21 +1,23 @@
 """
-train.py — Two-phase transfer learning training pipeline.
+train.py — Soil classification training pipeline.
 
-Phase 1: Frozen MobileNetV2 base, train classification head only.
-         High LR (1e-3) is safe because only the small head is updated.
+Two selectable training modes via TRAIN_CONFIG['use_focal_loss']:
 
-Phase 2: Unfreeze top 40 MobileNetV2 layers, fine-tune at low LR (1e-5).
-         BatchNorm layers in the base remain frozen to preserve ImageNet
-         running statistics (critical for small-batch fine-tuning).
+  OPTION A (default) — CrossEntropy + class_weight
+    - Standard categorical cross-entropy loss
+    - Inverse-frequency class weights passed to model.fit()
+    - Stable, well-understood training signal
+    - Recommended when dataset is moderately imbalanced
 
-Loss: FocalLoss(gamma=2.0, alpha=1.0)
-  - gamma=2.0 down-weights easy examples, focuses on hard/minority classes.
-  - alpha=1.0 correct for multi-class (0.25 is the binary detection default).
-  - class_weight NOT used — combining with Focal Loss double-counts imbalance
-    correction and causes gradient instability.
+  OPTION B — Focal Loss only (no class_weight)
+    - FocalLoss(gamma=2.0, alpha=1.0)
+    - class_weight intentionally removed — Focal Loss already handles
+      imbalance via (1-p_t)^gamma; combining both double-counts and
+      causes gradient instability
+    - alpha=1.0 correct for multi-class (0.25 is binary detection default)
+    - Recommended when minority classes are severely underrepresented
 
-Monitoring: val_accuracy (not val_loss) — Focal Loss values are small
-  (~0.001–0.05) so absolute changes don't reflect accuracy improvements well.
+Switch between modes by changing: TRAIN_CONFIG['use_focal_loss'] = True/False
 """
 
 import os
@@ -30,168 +32,286 @@ from model import build_model, unfreeze_top_layers, print_layer_status
 from losses import FocalLoss
 
 
-def compute_class_weights(class_names, data_dir, max_weight=2.0):
-    """
-    Log-smoothed class weights (kept for reference / optional use).
-    NOT used in model.fit() — Focal Loss handles imbalance.
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION — change settings here
+# ══════════════════════════════════════════════════════════════════════════════
+TRAIN_CONFIG = {
+    # Set True for Option B (Focal Loss), False for Option A (CrossEntropy)
+    'use_focal_loss': False,
 
-    Formula: w_i = log(N_total) / log(N_i), normalised, capped at max_weight.
+    # Focal Loss parameters (Option B only)
+    'focal_gamma': 2.0,
+    'focal_alpha': 1.0,   # must be 1.0 for multi-class, NOT 0.25
+
+    # Phase 1 — frozen base, train head only
+    'phase1_lr':     1e-3,
+    'phase1_epochs': 20,
+
+    # Phase 2 — fine-tune top N layers
+    'phase2_unfreeze_layers': 40,
+    # LR differs by loss: CrossEntropy can use slightly higher LR
+    # Focal Loss needs lower LR because gradients are already scaled
+    'phase2_lr_crossentropy': 1e-5,
+    'phase2_lr_focal':        3e-5,
+    'phase2_epochs':          20,
+
+    # Callbacks
+    'early_stop_patience':    8,
+    'reduce_lr_patience':     3,
+    'reduce_lr_factor':       0.5,
+    'min_delta':              1e-3,
+
+    # Gradient clipping — prevents exploding gradients during fine-tuning
+    'gradient_clip_norm':     1.0,
+
+    'batch_size': 32,
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLASS WEIGHTS
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_class_weights(class_names, data_dir):
     """
-    counts = np.array([
-        len(os.listdir(os.path.join(data_dir, 'train', cls)))
-        for cls in class_names
-    ], dtype=np.float32)
+    Inverse-frequency class weights — stronger and more stable than
+    the previous log-smoothed formula.
+
+    Formula:
+        w_i = N_total / (N_classes × N_i)
+
+    Then normalised so mean(w) == 1.0 to keep loss scale stable.
+
+    Properties:
+    - Minority classes get 2–5× higher weight than majority classes
+    - No division by zero (classes with 0 samples are skipped)
+    - Works for any dataset distribution
+
+    Returns:
+        dict {class_index: weight}  — passed to model.fit(class_weight=...)
+    """
+    counts = []
+    for cls in class_names:
+        cls_dir = os.path.join(data_dir, 'train', cls)
+        n = len(os.listdir(cls_dir)) if os.path.exists(cls_dir) else 1
+        counts.append(max(n, 1))   # guard against empty class
+
+    counts  = np.array(counts, dtype=np.float64)
     total   = counts.sum()
-    weights = np.log(total) / np.log(counts)
+    n_cls   = len(counts)
+
+    # Inverse-frequency
+    weights = total / (n_cls * counts)
+
+    # Normalise so mean == 1.0 (keeps loss magnitude comparable to unweighted)
     weights = weights / weights.mean()
-    weights = np.clip(weights, None, max_weight)
-    print("\nClass weights (reference only — not used in training):")
-    for cls, n, w in zip(class_names, counts, weights):
-        print(f"  {cls:14}: {int(n):4d} samples  weight={w:.4f}")
+
+    print("\nClass weights (inverse-frequency, normalised):")
+    for i, (cls, n, w) in enumerate(zip(class_names, counts, weights)):
+        bar = '█' * int(w * 10)
+        print(f"  [{i}] {cls:14}: {int(n):5d} samples  w={w:.4f}  {bar}")
+
     return {i: float(w) for i, w in enumerate(weights)}
 
 
-def train_system(data_dir='preprocessed_soil_dataset', epochs=20, batch_size=32):
+# ══════════════════════════════════════════════════════════════════════════════
+# LOSS FUNCTION
+# ══════════════════════════════════════════════════════════════════════════════
+def get_loss_function(config):
+    """
+    Returns (loss_fn, use_class_weight) based on config.
+
+    Option A: CrossEntropy + class_weight
+    Option B: FocalLoss    + no class_weight
+    """
+    if config['use_focal_loss']:
+        loss_fn = FocalLoss(
+            gamma=config['focal_gamma'],
+            alpha=config['focal_alpha']
+        )
+        print(f"\nLoss: FocalLoss(gamma={config['focal_gamma']}, "
+              f"alpha={config['focal_alpha']})")
+        print("      class_weight: DISABLED (Focal Loss handles imbalance)")
+        return loss_fn, False   # False = don't use class_weight
+    else:
+        loss_fn = 'categorical_crossentropy'
+        print("\nLoss: Categorical Cross-Entropy")
+        print("      class_weight: ENABLED (inverse-frequency)")
+        return loss_fn, True    # True = use class_weight
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CALLBACKS
+# ══════════════════════════════════════════════════════════════════════════════
+def make_callbacks(checkpoint_path, config):
+    """
+    Builds the standard callback set for one training phase.
+
+    All callbacks monitor val_accuracy (not val_loss) because:
+    - Focal Loss values are very small (~0.001–0.05) — absolute changes
+      don't reflect accuracy improvements reliably.
+    - val_accuracy is the metric we actually care about.
+    """
+    return [
+        EarlyStopping(
+            monitor='val_accuracy',
+            mode='max',
+            patience=config['early_stop_patience'],
+            restore_best_weights=True,
+            verbose=1,
+            min_delta=config['min_delta']
+        ),
+        ModelCheckpoint(
+            checkpoint_path,
+            monitor='val_accuracy',
+            mode='max',
+            save_best_only=True,
+            verbose=1
+        ),
+        ReduceLROnPlateau(
+            monitor='val_accuracy',
+            mode='max',
+            factor=config['reduce_lr_factor'],
+            patience=config['reduce_lr_patience'],
+            min_lr=1e-8,
+            verbose=1
+        ),
+    ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRAINING
+# ══════════════════════════════════════════════════════════════════════════════
+def train_model(data_dir='preprocessed_soil_dataset', config=None):
     """
     Full two-phase training pipeline.
 
     Args:
-        data_dir   : Root of preprocessed dataset (train/val/test subdirs).
-        epochs     : Max epochs for Phase 1.
-        batch_size : Samples per batch (32 recommended for MobileNetV2).
+        data_dir : Root of preprocessed dataset.
+        config   : Training configuration dict (defaults to TRAIN_CONFIG).
 
     Returns:
-        (history_p1, history_p2) — Keras History objects for both phases.
+        (history_p1, history_p2)
     """
+    if config is None:
+        config = TRAIN_CONFIG
+
+    mode = "OPTION B — Focal Loss" if config['use_focal_loss'] \
+           else "OPTION A — CrossEntropy + class_weight"
+
+    print("=" * 65)
+    print(f"Training mode: {mode}")
+    print("=" * 65)
 
     # ── 1. Data ───────────────────────────────────────────────────────────────
-    print("=" * 60)
-    print("Loading data...")
-    train_ds, val_ds, test_ds, class_names = get_data_loaders(
-        data_dir, batch_size=batch_size
+    print("\nLoading data...")
+    train_ds, val_ds, _, class_names = get_data_loaders(
+        data_dir, batch_size=config['batch_size']
     )
 
     class_indices = {name: i for i, name in enumerate(class_names)}
     with open('class_indices.json', 'w') as f:
         json.dump(class_indices, f)
-    print(f"\nClasses: {class_names}")
 
-    # ── 2. Model ──────────────────────────────────────────────────────────────
+    # ── 2. Class weights (computed regardless, used only in Option A) ─────────
+    raw_dir = data_dir if os.path.exists(os.path.join(data_dir, 'train')) \
+              else 'soil_dataset'
+    class_weight_dict = compute_class_weights(class_names, raw_dir)
+
+    # ── 3. Loss function ──────────────────────────────────────────────────────
+    loss_fn, use_class_weight = get_loss_function(config)
+
+    # class_weight passed to fit() only for Option A
+    fit_class_weight = class_weight_dict if use_class_weight else None
+
+    # ── 4. Model ──────────────────────────────────────────────────────────────
     print("\nBuilding model...")
     model, base_model = build_model(num_classes=len(class_names))
 
-    # Verify input shape matches MobileNetV2 requirement
     assert model.input_shape[1:] == (224, 224, 3), \
-        f"Input shape mismatch: {model.input_shape} — must be (None, 224, 224, 3)"
+        f"Input shape must be (None,224,224,3), got {model.input_shape}"
 
-    # Count parameters
     total_params     = model.count_params()
     trainable_params = sum(tf.size(w).numpy() for w in model.trainable_weights)
-    print(f"\n  Total parameters      : {total_params:,}")
-    print(f"  Trainable (Phase 1)   : {trainable_params:,}  (head only)")
-    print(f"  Frozen (base)         : {total_params - trainable_params:,}")
+    print(f"\n  Total parameters    : {total_params:,}")
+    print(f"  Trainable (Phase 1) : {trainable_params:,}  (head only)")
+    print(f"  Frozen (base)       : {total_params - trainable_params:,}")
+    print(f"  Input shape         : {model.input_shape}")
 
-    # ── 3. Loss ───────────────────────────────────────────────────────────────
-    # alpha=1.0 for multi-class; gamma=2.0 focuses on hard examples
-    focal_loss = FocalLoss(gamma=2.0, alpha=1.0)
-
-    # ── Phase 1: train head only ──────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("PHASE 1 — Training classification head (base frozen)")
-    print("=" * 60)
+    # ── Phase 1: train head, base frozen ─────────────────────────────────────
+    print("\n" + "=" * 65)
+    print("PHASE 1 — Head training (MobileNetV2 base frozen)")
+    print(f"  LR={config['phase1_lr']}  |  max_epochs={config['phase1_epochs']}")
+    print("=" * 65)
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-3),
-        loss=focal_loss,
+        optimizer=Adam(
+            learning_rate=config['phase1_lr'],
+            clipnorm=config['gradient_clip_norm']   # gradient clipping
+        ),
+        loss=loss_fn,
         metrics=['accuracy']
     )
-
-    # Print model summary once
-    model.summary(line_length=80)
-
-    callbacks_p1 = [
-        # val_accuracy is more meaningful than val_loss with Focal Loss
-        EarlyStopping(
-            monitor='val_accuracy', patience=7,
-            restore_best_weights=True, verbose=1, min_delta=1e-3
-        ),
-        ModelCheckpoint(
-            'soil_classifier_initial.keras', monitor='val_accuracy',
-            save_best_only=True, verbose=1
-        ),
-        ReduceLROnPlateau(
-            monitor='val_accuracy', factor=0.5, patience=3,
-            min_lr=1e-6, verbose=1, mode='max'
-        ),
-    ]
 
     history_p1 = model.fit(
         train_ds,
-        epochs=epochs,
+        epochs=config['phase1_epochs'],
         validation_data=val_ds,
-        callbacks=callbacks_p1
-        # NOTE: class_weight intentionally omitted.
-        # Focal Loss already handles class imbalance via (1-p_t)^gamma.
-        # Using both causes double-counting → gradient instability.
+        class_weight=fit_class_weight,
+        callbacks=make_callbacks('soil_classifier_initial.keras', config),
+        verbose=1
     )
 
-    best_p1_acc = max(history_p1.history['val_accuracy'])
-    print(f"\nPhase 1 best val_accuracy: {best_p1_acc:.4f}")
+    best_p1 = max(history_p1.history['val_accuracy'])
+    print(f"\nPhase 1 best val_accuracy: {best_p1:.4f}")
 
-    # ── Phase 2: fine-tune top 40 layers ─────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("PHASE 2 — Fine-tuning top 40 MobileNetV2 layers")
-    print("=" * 60)
+    # ── Phase 2: fine-tune top layers ─────────────────────────────────────────
+    n_unfreeze = config['phase2_unfreeze_layers']
+    p2_lr = config['phase2_lr_focal'] if config['use_focal_loss'] \
+            else config['phase2_lr_crossentropy']
 
-    # Unfreeze top 40 layers, keep all BN layers frozen
-    unfreeze_top_layers(base_model, n_layers=40)
+    print("\n" + "=" * 65)
+    print(f"PHASE 2 — Fine-tuning top {n_unfreeze} MobileNetV2 layers")
+    print(f"  LR={p2_lr}  |  max_epochs={config['phase2_epochs']}")
+    print("=" * 65)
+
+    unfreeze_top_layers(base_model, n_layers=n_unfreeze)
     print_layer_status(model)
 
-    # Low LR essential for fine-tuning — prevents catastrophic forgetting
-    # of ImageNet features learned in the base model.
     model.compile(
-        optimizer=Adam(learning_rate=1e-5),
-        loss=focal_loss,
+        optimizer=Adam(
+            learning_rate=p2_lr,
+            clipnorm=config['gradient_clip_norm']
+        ),
+        loss=loss_fn,
         metrics=['accuracy']
     )
 
-    fine_tune_epochs = 20
-    total_epochs     = epochs + fine_tune_epochs
-
-    callbacks_p2 = [
-        EarlyStopping(
-            monitor='val_accuracy', patience=10,
-            restore_best_weights=True, verbose=1, min_delta=1e-3
-        ),
-        ModelCheckpoint(
-            'soil_classifier_final.keras', monitor='val_accuracy',
-            save_best_only=True, verbose=1
-        ),
-        ReduceLROnPlateau(
-            monitor='val_accuracy', factor=0.5, patience=4,
-            min_lr=1e-8, verbose=1, mode='max'
-        ),
-    ]
+    total_epochs = config['phase1_epochs'] + config['phase2_epochs']
 
     history_p2 = model.fit(
         train_ds,
         epochs=total_epochs,
         initial_epoch=history_p1.epoch[-1],
         validation_data=val_ds,
-        callbacks=callbacks_p2
+        class_weight=fit_class_weight,
+        callbacks=make_callbacks('soil_classifier_final.keras', config),
+        verbose=1
     )
 
-    best_p2_acc = max(history_p2.history['val_accuracy'])
-    print(f"\nPhase 2 best val_accuracy: {best_p2_acc:.4f}")
-    print(f"Improvement over Phase 1 : {best_p2_acc - best_p1_acc:+.4f}")
+    best_p2 = max(history_p2.history['val_accuracy'])
+    print(f"\nPhase 2 best val_accuracy : {best_p2:.4f}")
+    print(f"Improvement over Phase 1  : {best_p2 - best_p1:+.4f}")
 
     model.save('soil_classifier_final.keras')
-    print("\nModel saved → soil_classifier_final.keras")
+    print("\nSaved → soil_classifier_final.keras")
     return history_p1, history_p2
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOT
+# ══════════════════════════════════════════════════════════════════════════════
 def plot_history(h1, h2):
-    """Plots combined Phase 1 + Phase 2 accuracy and loss curves."""
+    """Plots Phase 1 + Phase 2 accuracy and loss with phase boundary marker."""
     acc      = h1.history['accuracy']     + h2.history['accuracy']
     val_acc  = h1.history['val_accuracy'] + h2.history['val_accuracy']
     loss     = h1.history['loss']         + h2.history['loss']
@@ -199,13 +319,12 @@ def plot_history(h1, h2):
     p1_end   = len(h1.history['accuracy'])
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    for ax, train_vals, val_vals, title in [
+    for ax, tr, va, title in [
         (ax1, acc,  val_acc,  'Accuracy'),
-        (ax2, loss, val_loss, 'Focal Loss'),
+        (ax2, loss, val_loss, 'Loss'),
     ]:
-        ax.plot(train_vals, label='Train')
-        ax.plot(val_vals,   label='Validation')
+        ax.plot(tr, label='Train')
+        ax.plot(va, label='Validation')
         ax.axvline(p1_end - 1, color='gray', linestyle='--',
                    linewidth=1, label='Phase 1 → 2')
         ax.set_title(title)
@@ -216,12 +335,15 @@ def plot_history(h1, h2):
     plt.tight_layout()
     plt.savefig('training_plots.png', dpi=150)
     plt.show()
-    print("Training plots saved → training_plots.png")
+    print("Saved → training_plots.png")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     if os.path.exists('preprocessed_soil_dataset'):
-        h1, h2 = train_system()
+        h1, h2 = train_model()
         plot_history(h1, h2)
     else:
         if os.path.exists('soil_dataset'):
@@ -229,4 +351,3 @@ if __name__ == "__main__":
             print("Run: python preprocess_dataset.py")
         else:
             print("Error: 'soil_dataset' not found.")
-            print("Organise as: soil_dataset/train, /validation, /test")
