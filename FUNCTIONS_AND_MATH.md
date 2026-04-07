@@ -42,7 +42,7 @@ Constructs the full classification model using MobileNetV2 as a frozen feature e
 
 ### `get_data_loaders(data_dir, target_size=(224, 224), batch_size=32)`
 
-Builds `tf.data` pipelines for train, validation, and test sets with oversampling for minority classes.
+Builds `tf.data` pipelines for train, validation, and test sets with per-class augmentation policies and safe oversampling for minority classes.
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -51,18 +51,25 @@ Builds `tf.data` pipelines for train, validation, and test sets with oversamplin
 | `batch_size` | 32 | Number of images per batch |
 
 **What it does:**
-1. Loads train set unbatched (`batch_size=None`) to allow per-class filtering
-2. Counts images per class, computes `repeat_factor = ceil(max_count / class_count)` for each minority class
-3. Repeats minority class datasets so all classes reach approximately the same count
-4. Uses `tf.data.Dataset.sample_from_datasets` with uniform weights `[1/n_classes] * n_classes` to interleave classes evenly
-5. Applies augmentation to training only (flip, rotation, zoom, translation, brightness, contrast)
+1. Loads train set unbatched to allow per-class filtering and augmentation
+2. Counts images per class, computes `repeat_factor = ceil(max_count / class_count)` for minority classes
+3. For **minority classes** (Arid, Yellow):
+   - Shuffles with `reshuffle_each_iteration=True` before repeat — each epoch sees a different order
+   - Repeats the dataset `repeat_factor` times
+   - Applies **strong augmentation after repeat** — every copy gets a fresh random transformation, not the same baked-in one
+4. For **majority classes**: standard augmentation, no repeat
+5. Uses `tf.data.Dataset.sample_from_datasets` with uniform weights to interleave all classes evenly
 6. Normalises all pixels: `image / 255.0`
-7. Batches, caches, and prefetches for performance
+7. Batches, caches (val/test), and prefetches for performance
+
+**Augmentation policies:**
+
+| Policy | Classes | Layers |
+|---|---|---|
+| Standard | alluvial, black, red | RandomFlip, RandomRotation ±25°, RandomZoom ±25%, RandomTranslation ±10%, RandomBrightness 0.2, RandomContrast 0.2 |
+| Strong | arid, yellow | All of the above + RandomRotation ±35°, RandomZoom ±35°, RandomTranslation ±15%, RandomBrightness 0.35, RandomContrast 0.35, channel-wise colour scaling [0.75–1.25×], random sharpening blend |
 
 **Returns:** `(train_ds, val_ds, test_ds, class_names)`
-
-#### Inner function: `preprocess_train(image, label)`
-Normalises pixel values and applies the augmentation pipeline to a single training sample.
 
 #### Inner function: `preprocess_eval(image, label)`
 Normalises pixel values only — no augmentation for validation/test.
