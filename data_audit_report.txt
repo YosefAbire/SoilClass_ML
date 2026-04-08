@@ -1,0 +1,44 @@
+======================================================================
+DATA AUDIT REPORT — SoilClass ML
+======================================================================
+
+--- DATASET SUMMARY ---
+
+  TRAIN
+    alluvial      :   481 images
+    arid          :   166 images
+    black         :   754 images
+    red           :   772 images
+    yellow        :   968 images
+    TOTAL         :  3141 images
+
+  VALIDATION
+    alluvial      :   102 images
+    arid          :    36 images
+    black         :   155 images
+    red           :   164 images
+    yellow        :   204 images
+    TOTAL         :   661 images
+
+  TEST
+    alluvial      :   101 images
+    arid          :    38 images
+    black         :   161 images
+    red           :   164 images
+    yellow        :   205 images
+    TOTAL         :   669 images
+
+--- DUPLICATE IMAGES ---
+  ✅ No cross-split duplicates found.
+  ✅ No same-split duplicates found.
+
+--- LOW RESOLUTION IMAGES (< 224×224) ---
+  ✅ All images meet minimum resolution.
+
+--- SUSPICIOUS IMAGES (>90% SINGLE COLOUR) ---
+  ✅ No suspicious images found.
+
+--- VERDICT ---
+  ✅ Dataset is clean. No issues found.
+
+======================================================================
