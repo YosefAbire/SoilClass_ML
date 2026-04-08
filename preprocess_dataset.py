@@ -1,54 +1,53 @@
 """
 preprocess_dataset.py — Image preprocessing pipeline.
 
-Changes from original:
-  - Replaced global Histogram Equalization (destroyed colour) with CLAHE
-    (Contrast Limited Adaptive HE) applied only to the L channel in LAB
-    space — enhances local contrast while preserving colour information.
-  - Gaussian blur applied BEFORE contrast enhancement (correct order:
-    denoise first, then enhance).
-  - Falls back to PIL if OpenCV is not installed.
+Pipeline (per image):
+  1. CLAHE on L channel only (LAB colour space) — enhances local contrast
+     while preserving colour information (critical for soil type distinction).
+     Global histogram equalization was removed — it destroyed colour.
+  2. Gaussian blur removed — it softened texture edges which are the primary
+     discriminating feature between soil types. ImageNet normalisation in the
+     data loader handles input distribution alignment instead.
 """
 
 import os
 
+
 def preprocess_image(input_path, output_path):
     """
-    Pipeline:
-      1. Gaussian blur (radius=0.8) — light noise removal
-      2. CLAHE on L channel in LAB space — local contrast enhancement
-         without destroying colour (critical for soil type distinction)
-      3. Save to output path
+    Applies CLAHE on the L channel of LAB colour space.
+    No blur — texture preservation is more important than noise removal
+    for soil classification.
     """
     try:
         import cv2
-        import numpy as np
 
         img = cv2.imread(input_path)
         if img is None:
             raise ValueError("cv2 could not read image")
 
-        # Step 1 — light Gaussian blur (denoise before enhancing)
-        img = cv2.GaussianBlur(img, (3, 3), sigmaX=0.8)
-
-        # Step 2 — CLAHE on L channel only (preserves colour)
-        lab  = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        # Convert BGR → LAB
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
+
+        # CLAHE on L channel only — preserves A and B (colour) channels
+        # clipLimit=2.0 prevents over-amplification of noise
+        # tileGridSize=(8,8) applies local contrast enhancement
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l     = clahe.apply(l)
-        lab   = cv2.merge([l, a, b])
-        img   = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        l = clahe.apply(l)
+
+        # Merge and convert back to BGR
+        img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         cv2.imwrite(output_path, img)
         return True
 
     except ImportError:
-        # Fallback: PIL-only path (no CLAHE, just blur)
-        from PIL import Image, ImageFilter
+        # PIL fallback — no CLAHE, just copy (better than destroying colour)
+        from PIL import Image
         try:
             img = Image.open(input_path).convert('RGB')
-            img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             img.save(output_path)
             return True

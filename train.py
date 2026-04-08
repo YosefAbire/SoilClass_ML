@@ -49,14 +49,12 @@ TRAIN_CONFIG = {
 
     # Phase 2 — fine-tune top N layers
     'phase2_unfreeze_layers': 40,
-    # LR differs by loss: CrossEntropy can use slightly higher LR
-    # Focal Loss needs lower LR because gradients are already scaled
     'phase2_lr_crossentropy': 1e-5,
     'phase2_lr_focal':        3e-5,
     'phase2_epochs':          20,
 
-    # Callbacks
-    'early_stop_patience':    8,
+    # Callbacks — patience=10 gives minority classes time to converge
+    'early_stop_patience':    10,
     'reduce_lr_patience':     3,
     'reduce_lr_factor':       0.5,
     'min_delta':              1e-3,
@@ -195,6 +193,15 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     if config is None:
         config = TRAIN_CONFIG
 
+    # ── CPU optimisation (Windows, no GPU) ───────────────────────────────────
+    # Use all available logical cores for parallel data loading and ops.
+    # inter_op: parallelism between independent TF ops (e.g. separate branches)
+    # intra_op: parallelism within a single op (e.g. matrix multiply threads)
+    cpu_count = os.cpu_count() or 4
+    tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
+    tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
+    print(f"CPU threads configured: {cpu_count} (inter + intra op)")
+
     mode = "OPTION B — Focal Loss" if config['use_focal_loss'] \
            else "OPTION A — CrossEntropy + class_weight"
 
@@ -212,15 +219,33 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     with open('class_indices.json', 'w') as f:
         json.dump(class_indices, f)
 
-    # ── 2. Class weights (computed regardless, used only in Option A) ─────────
+    # ── steps_per_epoch — calculated from actual dataset size ─────────────────
+    # Counts total virtual training samples (after oversampling) and divides
+    # by batch_size so Keras knows exactly how many steps = 1 epoch.
+    # Without this, Keras may under- or over-count steps with sample_from_datasets.
+    train_dir = os.path.join(data_dir, 'train')
+    raw_counts = {
+        cls: len(os.listdir(os.path.join(train_dir, cls)))
+        for cls in os.listdir(train_dir)
+        if os.path.isdir(os.path.join(train_dir, cls))
+    }
+    from data_loader import MINORITY_CLASSES
+    max_count = max(raw_counts.values())
+    total_virtual = sum(
+        int(np.ceil(max_count / n)) * n if cls in MINORITY_CLASSES else n
+        for cls, n in raw_counts.items()
+    )
+    steps_per_epoch = max(1, total_virtual // config['batch_size'])
+    print(f"\n  Virtual training samples : {total_virtual:,}")
+    print(f"  Steps per epoch          : {steps_per_epoch}")
+
+    # ── 2. Class weights ──────────────────────────────────────────────────────
     raw_dir = data_dir if os.path.exists(os.path.join(data_dir, 'train')) \
               else 'soil_dataset'
     class_weight_dict = compute_class_weights(class_names, raw_dir)
 
     # ── 3. Loss function ──────────────────────────────────────────────────────
     loss_fn, use_class_weight = get_loss_function(config)
-
-    # class_weight passed to fit() only for Option A
     fit_class_weight = class_weight_dict if use_class_weight else None
 
     # ── 4. Model ──────────────────────────────────────────────────────────────
@@ -246,7 +271,7 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     model.compile(
         optimizer=Adam(
             learning_rate=config['phase1_lr'],
-            clipnorm=config['gradient_clip_norm']   # gradient clipping
+            clipnorm=config['gradient_clip_norm']
         ),
         loss=loss_fn,
         metrics=['accuracy']
@@ -255,6 +280,7 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     history_p1 = model.fit(
         train_ds,
         epochs=config['phase1_epochs'],
+        steps_per_epoch=steps_per_epoch,   # explicit step count for CPU pipeline
         validation_data=val_ds,
         class_weight=fit_class_weight,
         callbacks=make_callbacks('soil_classifier_initial.keras', config),
@@ -291,6 +317,7 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     history_p2 = model.fit(
         train_ds,
         epochs=total_epochs,
+        steps_per_epoch=steps_per_epoch,   # explicit step count for CPU pipeline
         initial_epoch=history_p1.epoch[-1],
         validation_data=val_ds,
         class_weight=fit_class_weight,
