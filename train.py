@@ -25,6 +25,14 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
+
+# ── CPU optimisation — must be set BEFORE TF initialises any ops ─────────────
+# Calling these inside a function is too late; TF initialises on first import.
+_cpu_count = os.cpu_count() or 4
+tf.config.threading.set_inter_op_parallelism_threads(_cpu_count)
+tf.config.threading.set_intra_op_parallelism_threads(_cpu_count)
+print(f"CPU threads: {_cpu_count} inter-op + {_cpu_count} intra-op")
+
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from data_loader import get_data_loaders
@@ -192,15 +200,6 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     """
     if config is None:
         config = TRAIN_CONFIG
-
-    # ── CPU optimisation (Windows, no GPU) ───────────────────────────────────
-    # Use all available logical cores for parallel data loading and ops.
-    # inter_op: parallelism between independent TF ops (e.g. separate branches)
-    # intra_op: parallelism within a single op (e.g. matrix multiply threads)
-    cpu_count = os.cpu_count() or 4
-    tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
-    tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
-    print(f"CPU threads configured: {cpu_count} (inter + intra op)")
 
     mode = "OPTION B — Focal Loss" if config['use_focal_loss'] \
            else "OPTION A — CrossEntropy + class_weight"
