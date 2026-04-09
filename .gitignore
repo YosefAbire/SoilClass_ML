@@ -14,13 +14,16 @@ venv/
 soil_dataset/
 preprocessed_soil_dataset/
 .tmp/
-FUNCTIONS_AND_MATH.md/
-ACCURACY_DIAGNOSIS.md/
+
+# Markdown files — ignore all except README.md
+*.md
+!README.md
 
 # Logs / outputs
 *.log
 training_plots.png
 confusion_matrix.png
+data_audit_report.txt
 
 # OS
 .DS_Store
