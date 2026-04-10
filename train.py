@@ -407,10 +407,31 @@ def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=10, config=None
     )
     print(f"\n  Loaded : soil_classifier_final.keras  {model.input_shape}")
 
-    from model import unfreeze_top_layers, print_layer_status
-    base = next(l for l in model.layers if 'mobilenetv2' in l.name.lower())
-    unfreeze_top_layers(base, n_layers=config['phase2_unfreeze_layers'])
-    print_layer_status(model)
+    # Model was saved flat — MobileNetV2 layers are at the top level.
+    # Unfreeze the top N layers directly on the full model, keeping BN frozen.
+    from tensorflow.keras.layers import BatchNormalization as BN
+    n_layers   = config['phase2_unfreeze_layers']
+    all_layers = model.layers
+    freeze_until = len(all_layers) - n_layers
+
+    for layer in all_layers:
+        layer.trainable = False                  # freeze everything first
+
+    bn_frozen = 0
+    for layer in all_layers[freeze_until:]:
+        if isinstance(layer, BN):
+            layer.trainable = False              # keep BN frozen always
+            bn_frozen += 1
+        else:
+            layer.trainable = True
+
+    trainable = sum(tf.size(w).numpy() for w in model.trainable_weights)
+    frozen    = sum(tf.size(w).numpy() for w in model.non_trainable_weights)
+    unfrozen  = sum(1 for l in all_layers if l.trainable)
+    print(f"  Unfrozen layers : {unfrozen}  (top {n_layers}, BN kept frozen)")
+    print(f"  BN kept frozen  : {bn_frozen}")
+    print(f"  Trainable params: {trainable:,}")
+    print(f"  Frozen params   : {frozen:,}")
 
     loss_fn = FocalLoss(gamma=2.0, alpha=1.0) if config['use_focal_loss'] \
               else 'categorical_crossentropy'
