@@ -79,44 +79,39 @@ TRAIN_CONFIG = {
 # ══════════════════════════════════════════════════════════════════════════════
 def compute_class_weights(class_names, data_dir):
     """
-    Inverse-frequency class weights — stronger and more stable than
-    the previous log-smoothed formula.
+    Manually tuned class weights based on Grad-CAM analysis results.
 
-    Formula:
-        w_i = N_total / (N_classes × N_i)
+    Findings: model has Arid bias — it over-predicts Arid even for Yellow
+    and Alluvial samples. Grad-CAM shows the model focuses on colour/tone
+    rather than texture for these classes.
 
-    Then normalised so mean(w) == 1.0 to keep loss scale stable.
-
-    Properties:
-    - Minority classes get 2–5× higher weight than majority classes
-    - No division by zero (classes with 0 samples are skipped)
-    - Works for any dataset distribution
+    Fix:
+      - Arid   reduced to 1.2  (was ~1.75) — reduce its dominance
+      - Yellow raised to 1.8   (was ~1.08) — force more attention
+      - Alluvial raised to 1.8 (was ~0.72) — force more attention
+      - Black / Red kept near 1.0 (balanced classes)
 
     Returns:
-        dict {class_index: weight}  — passed to model.fit(class_weight=...)
+        dict {class_index: weight}
     """
-    counts = []
-    for cls in class_names:
-        cls_dir = os.path.join(data_dir, 'train', cls)
-        n = len(os.listdir(cls_dir)) if os.path.exists(cls_dir) else 1
-        counts.append(max(n, 1))   # guard against empty class
+    # Manual overrides from Grad-CAM diagnosis
+    MANUAL_WEIGHTS = {
+        'alluvial': 1.8,
+        'arid':     1.2,
+        'black':    0.9,
+        'red':      0.9,
+        'yellow':   1.8,
+    }
 
-    counts  = np.array(counts, dtype=np.float64)
-    total   = counts.sum()
-    n_cls   = len(counts)
-
-    # Inverse-frequency
-    weights = total / (n_cls * counts)
-
-    # Normalise so mean == 1.0 (keeps loss magnitude comparable to unweighted)
-    weights = weights / weights.mean()
-
-    print("\nClass weights (inverse-frequency, normalised):")
-    for i, (cls, n, w) in enumerate(zip(class_names, counts, weights)):
+    weights = {}
+    print("\nClass weights (manually tuned from Grad-CAM analysis):")
+    for i, cls in enumerate(class_names):
+        w = MANUAL_WEIGHTS.get(cls, 1.0)
+        weights[i] = w
         bar = '█' * int(w * 10)
-        print(f"  [{i}] {cls:14}: {int(n):5d} samples  w={w:.4f}  {bar}")
+        print(f"  [{i}] {cls:14}: w={w:.1f}  {bar}")
 
-    return {i: float(w) for i, w in enumerate(weights)}
+    return weights
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -365,10 +360,97 @@ def plot_history(h1, h2):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# STANDALONE PHASE 2 FINE-TUNING  (python train.py --finetune)
+# ══════════════════════════════════════════════════════════════════════════════
+def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=10, config=None):
+    """
+    Loads the existing best model and runs fine-tuning with Grad-CAM
+    corrected class weights:
+      arid=1.2  (reduced — was causing prediction bias)
+      yellow=1.8, alluvial=1.8  (increased — under-predicted classes)
+    """
+    if config is None:
+        config = TRAIN_CONFIG
+
+    print("=" * 65)
+    print("PHASE 2 FINE-TUNING — Grad-CAM corrected weights")
+    print(f"  Epochs : {epochs}  |  LR : {config['phase2_lr_crossentropy']}")
+    print("=" * 65)
+
+    train_ds, val_ds, _, class_names = get_data_loaders(
+        data_dir, batch_size=config['batch_size']
+    )
+
+    train_dir = os.path.join(data_dir, 'train')
+    raw_counts = {
+        cls: len(os.listdir(os.path.join(train_dir, cls)))
+        for cls in os.listdir(train_dir)
+        if os.path.isdir(os.path.join(train_dir, cls))
+    }
+    from data_loader import MINORITY_CLASSES
+    max_count = max(raw_counts.values())
+    total_virtual = sum(
+        int(np.ceil(max_count / n)) * n if cls in MINORITY_CLASSES else n
+        for cls, n in raw_counts.items()
+    )
+    steps_per_epoch = max(1, total_virtual // config['batch_size'])
+    print(f"\n  Steps per epoch : {steps_per_epoch}")
+
+    raw_dir = data_dir if os.path.exists(os.path.join(data_dir, 'train')) else 'soil_dataset'
+    class_weight_dict = compute_class_weights(class_names, raw_dir)
+    fit_class_weight  = None if config['use_focal_loss'] else class_weight_dict
+
+    from losses import FocalLoss
+    model = tf.keras.models.load_model(
+        'soil_classifier_final.keras',
+        custom_objects={'FocalLoss': FocalLoss}
+    )
+    print(f"\n  Loaded : soil_classifier_final.keras  {model.input_shape}")
+
+    from model import unfreeze_top_layers, print_layer_status
+    base = next(l for l in model.layers if 'mobilenetv2' in l.name.lower())
+    unfreeze_top_layers(base, n_layers=config['phase2_unfreeze_layers'])
+    print_layer_status(model)
+
+    loss_fn = FocalLoss(gamma=2.0, alpha=1.0) if config['use_focal_loss'] \
+              else 'categorical_crossentropy'
+
+    model.compile(
+        optimizer=Adam(
+            learning_rate=config['phase2_lr_crossentropy'],
+            clipnorm=config['gradient_clip_norm']
+        ),
+        loss=loss_fn,
+        metrics=['accuracy']
+    )
+
+    history = model.fit(
+        train_ds,
+        epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_data=val_ds,
+        class_weight=fit_class_weight,
+        callbacks=make_callbacks('soil_classifier_final.keras', config),
+        verbose=1
+    )
+
+    best = max(history.history['val_accuracy'])
+    print(f"\nBest val_accuracy : {best:.4f}")
+    print("Saved → soil_classifier_final.keras")
+    return history
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    if os.path.exists('preprocessed_soil_dataset'):
+    import sys
+    if '--finetune' in sys.argv:
+        if os.path.exists('preprocessed_soil_dataset'):
+            finetune_phase2(epochs=10)
+        else:
+            print("Error: 'preprocessed_soil_dataset' not found.")
+    elif os.path.exists('preprocessed_soil_dataset'):
         h1, h2 = train_model()
         plot_history(h1, h2)
     else:
