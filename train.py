@@ -94,13 +94,14 @@ def compute_class_weights(class_names, data_dir):
     Returns:
         dict {class_index: weight}
     """
-    # Manual overrides from Grad-CAM diagnosis
+    # Manual overrides — re-balanced after Grad-CAM analysis
+    # v2: Black raised to 1.4 to prevent it being drowned out by Alluvial/Yellow boost
     MANUAL_WEIGHTS = {
-        'alluvial': 1.8,
-        'arid':     1.2,
-        'black':    0.9,
-        'red':      0.9,
-        'yellow':   1.8,
+        'alluvial': 1.6,
+        'arid':     1.1,
+        'black':    1.4,
+        'red':      1.0,
+        'yellow':   1.6,
     }
 
     weights = {}
@@ -362,19 +363,22 @@ def plot_history(h1, h2):
 # ══════════════════════════════════════════════════════════════════════════════
 # STANDALONE PHASE 2 FINE-TUNING  (python train.py --finetune)
 # ══════════════════════════════════════════════════════════════════════════════
-def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=10, config=None):
+# STANDALONE PHASE 2 FINE-TUNING  (python train.py --finetune)
+# ══════════════════════════════════════════════════════════════════════════════
+def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=5,
+                    lr=5e-6, n_unfreeze=75, config=None):
     """
-    Loads the existing best model and runs fine-tuning with Grad-CAM
-    corrected class weights:
-      arid=1.2  (reduced — was causing prediction bias)
-      yellow=1.8, alluvial=1.8  (increased — under-predicted classes)
+    Final stabilisation fine-tuning run.
+    - 5 epochs, lr=5e-6 (very small — prevents overshooting)
+    - 75 layers unfrozen (deeper than before — captures Black vs Alluvial texture)
+    - Re-balanced weights: Alluvial=1.6, Arid=1.1, Black=1.4, Red=1.0, Yellow=1.6
     """
     if config is None:
         config = TRAIN_CONFIG
 
     print("=" * 65)
-    print("PHASE 2 FINE-TUNING — Grad-CAM corrected weights")
-    print(f"  Epochs : {epochs}  |  LR : {config['phase2_lr_crossentropy']}")
+    print("FINAL STABILISATION FINE-TUNING")
+    print(f"  Epochs   : {epochs}  |  LR : {lr}  |  Unfreeze : {n_unfreeze} layers")
     print("=" * 65)
 
     train_ds, val_ds, _, class_names = get_data_loaders(
@@ -407,28 +411,25 @@ def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=10, config=None
     )
     print(f"\n  Loaded : soil_classifier_final.keras  {model.input_shape}")
 
-    # Model was saved flat — MobileNetV2 layers are at the top level.
-    # Unfreeze the top N layers directly on the full model, keeping BN frozen.
+    # Unfreeze top n_unfreeze layers, keep ALL BatchNorm frozen
     from tensorflow.keras.layers import BatchNormalization as BN
-    n_layers   = config['phase2_unfreeze_layers']
-    all_layers = model.layers
-    freeze_until = len(all_layers) - n_layers
+    all_layers   = model.layers
+    freeze_until = len(all_layers) - n_unfreeze
 
     for layer in all_layers:
-        layer.trainable = False                  # freeze everything first
+        layer.trainable = False
 
     bn_frozen = 0
     for layer in all_layers[freeze_until:]:
         if isinstance(layer, BN):
-            layer.trainable = False              # keep BN frozen always
+            layer.trainable = False
             bn_frozen += 1
         else:
             layer.trainable = True
 
     trainable = sum(tf.size(w).numpy() for w in model.trainable_weights)
     frozen    = sum(tf.size(w).numpy() for w in model.non_trainable_weights)
-    unfrozen  = sum(1 for l in all_layers if l.trainable)
-    print(f"  Unfrozen layers : {unfrozen}  (top {n_layers}, BN kept frozen)")
+    print(f"  Unfrozen layers : {sum(1 for l in all_layers if l.trainable)}  (top {n_unfreeze}, BN frozen)")
     print(f"  BN kept frozen  : {bn_frozen}")
     print(f"  Trainable params: {trainable:,}")
     print(f"  Frozen params   : {frozen:,}")
@@ -437,10 +438,7 @@ def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=10, config=None
               else 'categorical_crossentropy'
 
     model.compile(
-        optimizer=Adam(
-            learning_rate=config['phase2_lr_crossentropy'],
-            clipnorm=config['gradient_clip_norm']
-        ),
+        optimizer=Adam(learning_rate=lr, clipnorm=config['gradient_clip_norm']),
         loss=loss_fn,
         metrics=['accuracy']
     )
