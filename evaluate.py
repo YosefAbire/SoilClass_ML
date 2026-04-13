@@ -22,11 +22,11 @@ from sklearn.preprocessing import label_binarize
 from data_loader import get_data_loaders
 from losses import FocalLoss
 
-CLASS_COLORS = ['#3A7D44', '#C47C2B', '#4A3728', '#B03A2E', '#C9A227']
+CLASS_COLORS = ['#3A7D44', '#4A3728', '#B03A2E', '#C9A227']
 
 
 def evaluate_model(model_path='soil_classifier_final.keras',
-                   data_dir='soil_dataset'):
+                   data_dir='soil_dataset_4class'):
 
     # ── Load model ────────────────────────────────────────────────────────────
     print("Loading model...")

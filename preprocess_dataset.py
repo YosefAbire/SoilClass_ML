@@ -61,8 +61,16 @@ def preprocess_image(input_path, output_path):
 
 
 def main():
-    input_dir  = 'soil_dataset'
-    output_dir = 'preprocessed_soil_dataset'
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input',  default='soil_dataset_4class',
+                        help='Source dataset directory (default: soil_dataset_4class)')
+    parser.add_argument('--output', default='preprocessed_4class',
+                        help='Output directory (default: preprocessed_4class)')
+    args = parser.parse_args()
+
+    input_dir  = args.input
+    output_dir = args.output
 
     if not os.path.exists(input_dir):
         print(f"Error: '{input_dir}' not found.")

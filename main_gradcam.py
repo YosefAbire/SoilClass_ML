@@ -26,10 +26,10 @@ from utils import preprocess_image, deprocess_image
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 MODEL_PATH  = 'soil_classifier_final.keras'   # latest trained model
-DATASET_DIR = 'soil_dataset/test'             # source of test images
+DATASET_DIR = 'soil_dataset_4class/test'             # source of test images
 
 # Alphabetical order — must match how tf.keras reads the dataset folder
-CLASS_NAMES = ['alluvial', 'arid', 'black', 'red', 'yellow']
+CLASS_NAMES = ['alluvial', 'black', 'red', 'yellow']   # arid removed
 
 OUTPUT_DIR  = 'gradcam_outputs'
 FINAL_DIR   = 'final_explanations'   # "After" balanced model outputs

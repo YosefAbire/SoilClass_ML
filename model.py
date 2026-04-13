@@ -27,7 +27,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras import regularizers
 
 
-def build_model(num_classes=5, input_shape=(224, 224, 3)):
+def build_model(num_classes=4, input_shape=(224, 224, 3)):
     """
     Builds the MobileNetV2-based classification model.
 
@@ -35,8 +35,12 @@ def build_model(num_classes=5, input_shape=(224, 224, 3)):
     Phase 2 usage: call unfreeze_top_layers() then recompile.
 
     Args:
-        num_classes  : Number of output classes (5 soil types).
+        num_classes  : Number of output classes (4 soil types — arid removed).
         input_shape  : Must be (224, 224, 3) — MobileNetV2 requirement.
+
+    IMPORTANT: Always build from fresh ImageNet weights.
+    Do NOT load a previous 5-class .keras file — the output layer shape
+    won't match and weights cannot be transferred.
 
     Returns:
         model      : Full compiled-ready Keras model.

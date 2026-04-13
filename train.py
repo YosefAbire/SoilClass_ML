@@ -45,32 +45,36 @@ from losses import FocalLoss
 # ══════════════════════════════════════════════════════════════════════════════
 TRAIN_CONFIG = {
     # Set True for Option B (Focal Loss), False for Option A (CrossEntropy)
+    # With equalized classes, CrossEntropy is sufficient
     'use_focal_loss': False,
 
     # Focal Loss parameters (Option B only)
     'focal_gamma': 2.0,
-    'focal_alpha': 1.0,   # must be 1.0 for multi-class, NOT 0.25
+    'focal_alpha': 1.0,
 
-    # Phase 1 — frozen base, train head only
+    # Phase 1 — frozen base, train head only (warm-up)
     'phase1_lr':     1e-3,
-    'phase1_epochs': 20,
+    'phase1_epochs': 10,
 
-    # Phase 2 — fine-tune top N layers
-    'phase2_unfreeze_layers': 40,
+    # Phase 2 — fine-tune top 50 layers
+    'phase2_unfreeze_layers': 50,
     'phase2_lr_crossentropy': 1e-5,
     'phase2_lr_focal':        3e-5,
-    'phase2_epochs':          20,
+    'phase2_epochs':          15,
 
-    # Callbacks — patience=10 gives minority classes time to converge
+    # Callbacks
     'early_stop_patience':    10,
     'reduce_lr_patience':     3,
     'reduce_lr_factor':       0.5,
     'min_delta':              1e-3,
 
-    # Gradient clipping — prevents exploding gradients during fine-tuning
+    # Gradient clipping
     'gradient_clip_norm':     1.0,
 
     'batch_size': 32,
+
+    # 4-class dataset paths
+    'data_dir': 'preprocessed_4class',
 }
 
 
@@ -94,18 +98,18 @@ def compute_class_weights(class_names, data_dir):
     Returns:
         dict {class_index: weight}
     """
-    # Manual overrides — re-balanced after Grad-CAM analysis
-    # v2: Black raised to 1.4 to prevent it being drowned out by Alluvial/Yellow boost
+    # 4-class equalized dataset — classes are balanced at ~650 each.
+    # Equal weights (1.0) are appropriate; no correction needed.
+    # Alluvial may still be slightly lower (~481 after cap) so give it a small boost.
     MANUAL_WEIGHTS = {
-        'alluvial': 1.6,
-        'arid':     1.1,
-        'black':    1.4,
+        'alluvial': 1.3,
+        'black':    1.0,
         'red':      1.0,
-        'yellow':   1.6,
+        'yellow':   1.0,
     }
 
     weights = {}
-    print("\nClass weights (manually tuned from Grad-CAM analysis):")
+    print("\nClass weights (4-class equalized):")
     for i, cls in enumerate(class_names):
         w = MANUAL_WEIGHTS.get(cls, 1.0)
         weights[i] = w
@@ -183,7 +187,7 @@ def make_callbacks(checkpoint_path, config):
 # ══════════════════════════════════════════════════════════════════════════════
 # TRAINING
 # ══════════════════════════════════════════════════════════════════════════════
-def train_model(data_dir='preprocessed_soil_dataset', config=None):
+def train_model(data_dir=None, config=None):
     """
     Full two-phase training pipeline.
 
@@ -196,6 +200,8 @@ def train_model(data_dir='preprocessed_soil_dataset', config=None):
     """
     if config is None:
         config = TRAIN_CONFIG
+    if data_dir is None:
+        data_dir = config.get('data_dir', 'preprocessed_4class')
 
     mode = "OPTION B — Focal Loss" if config['use_focal_loss'] \
            else "OPTION A — CrossEntropy + class_weight"
@@ -465,16 +471,15 @@ def finetune_phase2(data_dir='preprocessed_soil_dataset', epochs=5,
 if __name__ == "__main__":
     import sys
     if '--finetune' in sys.argv:
-        if os.path.exists('preprocessed_soil_dataset'):
-            finetune_phase2(epochs=10)
+        if os.path.exists('preprocessed_4class'):
+            finetune_phase2(data_dir='preprocessed_4class', epochs=5,
+                            lr=5e-6, n_unfreeze=75)
         else:
-            print("Error: 'preprocessed_soil_dataset' not found.")
-    elif os.path.exists('preprocessed_soil_dataset'):
+            print("Error: 'preprocessed_4class' not found.")
+    elif os.path.exists('preprocessed_4class'):
         h1, h2 = train_model()
         plot_history(h1, h2)
     else:
-        if os.path.exists('soil_dataset'):
-            print("Error: 'preprocessed_soil_dataset' not found.")
-            print("Run: python preprocess_dataset.py")
-        else:
-            print("Error: 'soil_dataset' not found.")
+        print("Error: 'preprocessed_4class' not found.")
+        print("Run: python prepare_4class.py")
+        print("Then: python preprocess_dataset.py --input soil_dataset_4class --output preprocessed_4class")

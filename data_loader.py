@@ -20,7 +20,7 @@ import numpy as np
 import os
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MINORITY_CLASSES = {'arid', 'alluvial', 'yellow'}
+MINORITY_CLASSES = {'alluvial'}   # arid removed; alluvial is the only class below 650
 
 # MobileNetV2 was pre-trained with these ImageNet statistics.
 # Applying them aligns our input distribution with the base model's
