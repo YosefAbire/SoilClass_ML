@@ -18,7 +18,7 @@ BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH  = os.path.join(BASE_DIR, 'soil_classifier_final.keras')
 CLASS_JSON  = os.path.join(BASE_DIR, 'class_indices.json')
 TRAIN_PLOT  = os.path.join(BASE_DIR, 'training_plots.png')
-DATASET_DIR = os.path.join(BASE_DIR, 'soil_dataset')
+DATASET_DIR = os.path.join(BASE_DIR, 'soil_dataset_4class')
 
 # ── Design tokens ─────────────────────────────────────────────────────────────
 PRIMARY   = '#7C4A1E'   # rich brown  — buttons, accents
@@ -34,7 +34,6 @@ HEADING   = '#3D1F08'   # dark brown headings
 
 CLASS_COLORS = {
     'alluvial': '#3A7D44',
-    'arid':     '#C47C2B',
     'black':    '#4A3728',
     'red':      '#B03A2E',
     'yellow':   '#C9A227',
@@ -49,14 +48,6 @@ CROP_DATA = {
         'avoid': ['Crops requiring very dry conditions'],
         'tips': 'Maintain organic matter levels. Avoid waterlogging in low-lying areas. Excellent for double-cropping systems.',
         'icon': '🌾',
-    },
-    'arid': {
-        'description': 'Arid soil is sandy, low in organic matter, and has poor water retention. It is found in dry and desert regions with low rainfall.',
-        'best_for': ['Millet (Bajra)', 'Sorghum', 'Barley', 'Drought-resistant Pulses', 'Groundnut'],
-        'also_suitable': ['Date Palm', 'Cactus crops', 'Drought-tolerant vegetables (Onion, Garlic)'],
-        'avoid': ['Water-intensive crops like Rice, Sugarcane'],
-        'tips': 'Use drip irrigation to conserve water. Add organic compost to improve fertility. Mulching helps retain soil moisture.',
-        'icon': '🌵',
     },
     'black': {
         'description': 'Black soil (Regur) is rich in calcium, magnesium, and iron. It has high water retention capacity and swells when wet, making it ideal for rain-fed crops.',
@@ -322,7 +313,7 @@ if page == "🏠  Overview":
 | Pooling | GlobalAveragePooling2D |
 | Dense | 128 units · ReLU |
 | Dropout | 0.5 |
-| Output | 5 units · Softmax |
+| Output | 4 units · Softmax |
 """)
         st.subheader("Training Strategy")
         st.markdown(f"""
@@ -732,7 +723,7 @@ elif page == "⚙️  Hyperparameters":
         badge("Fine-tune layers",    "top 20 of MobileNetV2","rest remain frozen")
     with col2:
         suggest("Dense units",    "256 or 512",   "Larger head may capture more complex soil features")
-        suggest("Dropout rate",   "0.3 – 0.4",    "Lower dropout if model underfits on small classes (arid)")
+        suggest("Dropout rate",   "0.3 – 0.4",    "Lower dropout if model underfits on small classes (alluvial)")
         suggest("Extra Dense",    "Dense(64) after Dense(128)", "Adds depth before output; try with BatchNorm")
         suggest("Fine-tune layers","top 30 – 40", "Unfreeze more layers for domain-specific fine-tuning")
         suggest("Base model",     "EfficientNetB0 / B2", "Higher accuracy at similar or lower parameter count")
