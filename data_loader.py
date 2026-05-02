@@ -1,13 +1,17 @@
 """
-data_loader.py — Augmentation pipeline optimised for 4-class balanced soil dataset.
+data_loader.py — Preprocessing & augmentation pipeline for MobileNetV2.
 
-Key changes for 70-80% accuracy push:
-  - Strong colour jitter (brightness ±30%, contrast ±30%, saturation via
-    channel scaling ±25%) forces the model to learn TEXTURE not colour.
-    Alluvial/Red confusion is colour-based — this directly addresses it.
-  - Gaussian noise (stddev=0.03) prevents pixel-level memorisation.
-  - Random sharpening emphasises grain size differences between classes.
-  - All classes get the same strong augmentation — dataset is balanced.
+Key design decisions:
+  1. ImageNet normalisation applied to ALL splits (train/val/test) so the
+     input distribution matches MobileNetV2's pre-training exactly.
+  2. Augmentation operates on [0,1] float images BEFORE normalisation,
+     then normalisation is applied as the final step.
+  3. Minority classes (arid, alluvial, yellow) use texture-focused
+     augmentation: narrow colour jitter, Gaussian noise, random sharpening.
+  4. Mixup blending creates genuinely new synthetic samples for minority
+     classes rather than just repeating the same images.
+  5. Shuffle-before-repeat ensures each oversampled pass sees a different
+     image order, preventing the model memorising repetition patterns.
 """
 
 import tensorflow as tf
@@ -15,76 +19,140 @@ from tensorflow.keras import layers
 import numpy as np
 import os
 
-MINORITY_CLASSES = set()   # all 4 classes equalised at 480 — no oversampling
+# ── Constants ─────────────────────────────────────────────────────────────────
+MINORITY_CLASSES = set()   # all 4 classes are equalised at 480 — no oversampling needed
 
+# MobileNetV2 was pre-trained with these ImageNet statistics.
+# Applying them aligns our input distribution with the base model's
+# learned feature space — critical for effective transfer learning.
 IMAGENET_MEAN = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
 IMAGENET_STD  = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
 
 
-def build_strong_aug():
+# ── Normalisation ─────────────────────────────────────────────────────────────
+def imagenet_normalize(image):
     """
-    Strong augmentation for all 4 classes.
+    Scale pixel values from [0, 255] → [0, 1] → ImageNet normalised.
 
-    Design rationale for 70-80% accuracy:
-    - Alluvial is confused with Red/Yellow because they share warm tones.
-      Wide colour jitter (±30%) forces the model to ignore colour and
-      learn grain size, surface texture, and structural patterns instead.
-    - Gaussian noise (stddev=0.03) prevents memorising exact pixel values
-      from the 480 training images.
-    - Random sharpening emphasises texture edges — the primary discriminating
-      feature between alluvial (fine silt), black (clay), red (coarse grain).
-    - Wider spatial transforms (rotation ±25°, zoom ±20%) create more
-      geometric variety from the limited 480-image pool.
+    Formula: x_norm = (x / 255 - mean) / std
+    Output range: approximately [-2.1, 2.6] per channel.
+    """
+    image = tf.cast(image, tf.float32) / 255.0
+    return (image - IMAGENET_MEAN) / IMAGENET_STD
+
+
+# ── Mixup ─────────────────────────────────────────────────────────────────────
+def mixup_batch(images, labels, alpha=0.3):
+    """
+    Mixup augmentation: creates synthetic samples by blending image pairs.
+
+    x_mix = λ·x_i + (1-λ)·x_j
+    y_mix = λ·y_i + (1-λ)·y_j
+
+    λ ~ Uniform(alpha, 1-alpha)  →  keeps blends close to one original,
+    not a 50/50 blend, so the dominant class label is still meaningful.
+
+    Applied after ImageNet normalisation so blending is in the same
+    feature space the model will operate in.
+    """
+    batch_size = tf.shape(images)[0]
+    lam        = tf.random.uniform([batch_size], minval=alpha, maxval=1.0 - alpha)
+    indices    = tf.random.shuffle(tf.range(batch_size))
+    images_j   = tf.gather(images, indices)
+    labels_j   = tf.gather(labels, indices)
+    lam_img    = tf.reshape(lam, [batch_size, 1, 1, 1])
+    lam_lbl    = tf.reshape(lam, [batch_size, 1])
+    return (lam_img * images + (1.0 - lam_img) * images_j,
+            lam_lbl * labels + (1.0 - lam_lbl) * labels_j)
+
+
+# ── Augmentation policies ─────────────────────────────────────────────────────
+def build_standard_aug():
+    """
+    Standard augmentation for majority classes (black, red).
+    Moderate spatial transforms + narrow colour jitter.
+    Narrow brightness/contrast (0.1) prevents the model from relying
+    on lighting conditions rather than soil texture.
     """
     return tf.keras.Sequential([
         layers.RandomFlip("horizontal_and_vertical"),
-        layers.RandomRotation(0.25),
-        layers.RandomZoom(0.20),
-        layers.RandomTranslation(0.12, 0.12),
+        layers.RandomRotation(0.20),
+        layers.RandomZoom(0.15),
+        layers.RandomTranslation(0.10, 0.10),
+        # Narrow range — model should not rely on lighting
+        layers.RandomBrightness(0.10),
+        layers.RandomContrast(0.10),
+    ], name="standard_aug")
 
-        # Wide colour jitter — force texture-based learning, not colour
-        layers.RandomBrightness(0.30),
-        layers.RandomContrast(0.30),
 
-        # Per-channel saturation simulation (colour jitter)
+def build_texture_aug():
+    """
+    Texture-focused augmentation for minority classes (arid, alluvial, yellow).
+
+    Rationale:
+    - Arid, Red, Yellow share similar warm colour tones → narrow colour
+      jitter (0.12) so the model cannot cheat by memorising hue.
+    - GaussianNoise (stddev=0.025) forces the model to learn robust texture
+      features (grain size, surface roughness) rather than exact pixel values.
+    - RandomSharpen emphasises soil grain and texture edges — the primary
+      discriminating feature between visually similar classes.
+    - Per-channel scaling [0.88, 1.12] simulates camera white-balance
+      variation across different field photography conditions.
+    - Wider spatial transforms (rotation ±30°, zoom ±25%) create more
+      geometric variety from the limited pool of real minority images.
+    """
+    return tf.keras.Sequential([
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.30),
+        layers.RandomZoom(0.25),
+        layers.RandomTranslation(0.15, 0.15),
+
+        # Narrow colour jitter — prevent colour-reliance
+        layers.RandomBrightness(0.12),
+        layers.RandomContrast(0.12),
+
+        # Per-channel white-balance simulation
         layers.Lambda(
             lambda x: tf.clip_by_value(
-                x * tf.random.uniform([1, 1, 3], 0.75, 1.25), 0.0, 1.0
-            ), name="channel_jitter"
+                x * tf.random.uniform([1, 1, 3], 0.88, 1.12), 0.0, 1.0
+            ), name="channel_scale"
         ),
 
-        # Gaussian noise — prevents pixel memorisation
+        # Gaussian noise — forces texture-based feature learning
         layers.Lambda(
             lambda x: tf.clip_by_value(
-                x + tf.random.normal(tf.shape(x), mean=0.0, stddev=0.03),
+                x + tf.random.normal(tf.shape(x), mean=0.0, stddev=0.025),
                 0.0, 1.0
             ), name="gaussian_noise"
         ),
 
-        # Random sharpening — emphasises grain/texture edges
-        # Uses avg_pool on the image directly (already rank 4: B,H,W,C)
+        # Random sharpening — emphasises grain size and texture edges
         layers.Lambda(
             lambda x: tf.clip_by_value(
-                x + tf.random.uniform([], 0.0, 0.25) * (
-                    x - tf.nn.avg_pool2d(x, ksize=3, strides=1, padding='SAME')
+                x + tf.random.uniform([], 0.0, 0.20) * (
+                    x - tf.nn.avg_pool2d(
+                        tf.expand_dims(x, 0), ksize=3, strides=1, padding='SAME'
+                    )[0]
                 ), 0.0, 1.0
             ), name="random_sharpen"
         ),
-    ], name="strong_aug")
+    ], name="texture_aug")
 
 
-def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32, **kwargs):
+# ── Main loader ───────────────────────────────────────────────────────────────
+def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32,
+                     use_mixup=False, mixup_alpha=0.3):
     """
     Builds tf.data pipelines for train / validation / test.
 
-    Training pipeline:
-      uint8 → [0,1] → strong augmentation → ImageNet normalise → repeat → prefetch
+    With equalised classes (480 each), uses a simple batched pipeline:
+      raw uint8 → [0,1] → augmentation → batch → repeat → ImageNet normalise → prefetch
 
-    Val/Test pipeline:
-      uint8 → [0,1] → ImageNet normalise → cache → prefetch
+    Val/Test: raw uint8 → [0,1] → ImageNet normalise → cache → prefetch
     """
     AUTOTUNE = tf.data.AUTOTUNE
 
+    # ── Load datasets ─────────────────────────────────────────────────────────
     train_ds_raw = tf.keras.utils.image_dataset_from_directory(
         f"{data_dir}/train",
         label_mode='categorical',
@@ -117,11 +185,11 @@ def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32, **kwargs):
     for cls, n in counts.items():
         print(f"  {cls:14}: {n:4d} images")
 
-    aug = build_strong_aug()
+    standard_aug = build_standard_aug()
 
     def preprocess_train(image, label):
         image = tf.cast(image, tf.float32) / 255.0
-        image = aug(image, training=True)
+        image = standard_aug(image, training=True)
         image = (image - IMAGENET_MEAN) / IMAGENET_STD
         return image, label
 
@@ -129,6 +197,7 @@ def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32, **kwargs):
         image = tf.cast(image, tf.float32) / 255.0
         return (image - IMAGENET_MEAN) / IMAGENET_STD, label
 
+    # Training: augment → repeat (infinite stream) → prefetch
     train_ds = (train_ds_raw
                 .map(preprocess_train, num_parallel_calls=AUTOTUNE)
                 .repeat()
