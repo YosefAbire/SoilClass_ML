@@ -98,24 +98,12 @@ def compute_class_weights(class_names, data_dir):
     Returns:
         dict {class_index: weight}
     """
-    # 4-class equalized dataset — classes are balanced at ~650 each.
-    # Equal weights (1.0) are appropriate; no correction needed.
-    # Alluvial may still be slightly lower (~481 after cap) so give it a small boost.
-    MANUAL_WEIGHTS = {
-        'alluvial': 1.3,
-        'black':    1.0,
-        'red':      1.0,
-        'yellow':   1.0,
-    }
-
-    weights = {}
-    print("\nClass weights (4-class equalized):")
+    # All 4 classes are equalised at 480 train images each.
+    # Equal weights — no correction needed.
+    weights = {i: 1.0 for i in range(len(class_names))}
+    print("\nClass weights: equal (1.0 each — dataset is balanced)")
     for i, cls in enumerate(class_names):
-        w = MANUAL_WEIGHTS.get(cls, 1.0)
-        weights[i] = w
-        bar = '█' * int(w * 10)
-        print(f"  [{i}] {cls:14}: w={w:.1f}  {bar}")
-
+        print(f"  [{i}] {cls:14}: w=1.0")
     return weights
 
 

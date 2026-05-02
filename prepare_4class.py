@@ -1,33 +1,54 @@
 """
-prepare_4class.py — Removes Arid class and applies Cap & Boost strategy.
+prepare_4class.py — Builds a perfectly equalised 4-class dataset.
 
 Strategy:
-  - Exclude arid entirely from all splits
-  - Training set: target 650 images per class
-      > 650 (black=754, red=772, yellow=968) → random down-sample to 650
-      < 650 (alluvial=481)                   → copy as-is (augmentation
-                                               happens live in data_loader)
-  - Val / Test: keep as-is (just exclude arid)
+  - Exclude arid entirely
+  - Cap every class to the MINIMUM count across that split
+    so all classes have exactly the same number of images.
+
+  Train    : min(alluvial=481, black=754, red=772, yellow=968) = 481 each
+  Validation: min(alluvial=102, black=155, red=164, yellow=204) = 102 each
+  Test     : min(alluvial=101, black=161, red=164, yellow=205) = 101 each
+
+  Total after equalisation:
+    Train      : 4 × 481 = 1924
+    Validation : 4 × 102 =  408
+    Test       : 4 × 101 =  404
 
 Output: soil_dataset_4class/  (original soil_dataset/ is untouched)
 
 Usage:
     python prepare_4class.py
+    python prepare_4class.py --force   # delete existing and rebuild
 """
 
 import os
 import shutil
 import random
+import argparse
 
-SRC_DIR    = 'soil_dataset'
-DST_DIR    = 'soil_dataset_4class'
-CLASSES    = ['alluvial', 'black', 'red', 'yellow']   # arid excluded
-TRAIN_CAP  = 650
-SEED       = 42
+SRC_DIR = 'soil_dataset'
+DST_DIR = 'soil_dataset_4class'
+CLASSES = ['alluvial', 'black', 'red', 'yellow']   # arid excluded
+SEED    = 42
 random.seed(SEED)
 
 
-def copy_split(split, cap=None):
+def get_min_count(split):
+    """Returns the minimum image count across all 4 classes for a split."""
+    counts = []
+    for cls in CLASSES:
+        cls_dir = os.path.join(SRC_DIR, split, cls)
+        if not os.path.exists(cls_dir):
+            continue
+        n = len([f for f in os.listdir(cls_dir)
+                 if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))])
+        counts.append(n)
+    return min(counts)
+
+
+def copy_split(split, cap):
+    print(f"\n  {split.upper()} — capping at {cap} per class:")
     for cls in CLASSES:
         src = os.path.join(SRC_DIR, split, cls)
         dst = os.path.join(DST_DIR, split, cls)
@@ -36,48 +57,58 @@ def copy_split(split, cap=None):
         images = [f for f in os.listdir(src)
                   if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
 
-        if cap and len(images) > cap:
-            # Down-sample: random subset
-            images = random.sample(images, cap)
-            print(f"  {split}/{cls}: {len(os.listdir(src))} → {cap} (down-sampled)")
-        else:
-            print(f"  {split}/{cls}: {len(images)} (kept as-is)")
+        # Random sample down to cap
+        selected = random.sample(images, cap)
 
-        for fname in images:
+        for fname in selected:
             shutil.copy2(os.path.join(src, fname), os.path.join(dst, fname))
+
+        print(f"    {cls:12}: {len(images):4d} → {cap} copied")
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--force', action='store_true',
+                        help='Delete existing output and rebuild')
+    args = parser.parse_args()
+
     if os.path.exists(DST_DIR):
-        print(f"'{DST_DIR}' already exists — delete it to re-run.")
-        return
+        if args.force:
+            shutil.rmtree(DST_DIR)
+            print(f"Deleted existing '{DST_DIR}'")
+        else:
+            print(f"'{DST_DIR}' already exists.")
+            print("Run with --force to rebuild: python prepare_4class.py --force")
+            return
 
-    print(f"Building 4-class dataset → {DST_DIR}/")
-    print(f"Classes : {CLASSES}")
-    print(f"Train cap: {TRAIN_CAP} per class\n")
+    print(f"Building equalised 4-class dataset → {DST_DIR}/")
+    print(f"Classes  : {CLASSES}  (arid excluded)")
 
-    print("TRAIN (cap at 650):")
-    copy_split('train', cap=TRAIN_CAP)
+    # Compute caps per split
+    caps = {split: get_min_count(split) for split in ['train', 'validation', 'test']}
+    print(f"\nCaps per split:")
+    for split, cap in caps.items():
+        print(f"  {split:12}: {cap} per class  ({cap * len(CLASSES)} total)")
 
-    print("\nVALIDATION (no cap):")
-    copy_split('validation', cap=None)
+    for split, cap in caps.items():
+        copy_split(split, cap)
 
-    print("\nTEST (no cap):")
-    copy_split('test', cap=None)
-
-    # Summary
+    # Final summary
     print("\n--- Final counts ---")
+    grand_total = 0
     for split in ['train', 'validation', 'test']:
-        total = 0
+        split_total = 0
         for cls in CLASSES:
             n = len(os.listdir(os.path.join(DST_DIR, split, cls)))
-            total += n
-            print(f"  {split}/{cls}: {n}")
-        print(f"  {split} TOTAL: {total}\n")
+            split_total += n
+        grand_total += split_total
+        print(f"  {split:12}: {split_total} images  ({split_total // len(CLASSES)} per class)")
+    print(f"  {'TOTAL':12}: {grand_total} images")
 
-    print(f"Done. Dataset saved to '{DST_DIR}/'")
-    print("Next: python preprocess_dataset.py  (point it at soil_dataset_4class)")
-    print("Then: python train.py")
+    print(f"\nDone. Dataset saved to '{DST_DIR}/'")
+    print("\nNext steps:")
+    print("  python preprocess_dataset.py --input soil_dataset_4class --output preprocessed_4class")
+    print("  python train.py")
 
 
 if __name__ == '__main__':
