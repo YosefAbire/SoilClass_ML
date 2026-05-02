@@ -44,36 +44,33 @@ from losses import FocalLoss
 # CONFIGURATION — change settings here
 # ══════════════════════════════════════════════════════════════════════════════
 TRAIN_CONFIG = {
-    # Set True for Option B (Focal Loss), False for Option A (CrossEntropy)
-    # With equalized classes, CrossEntropy is sufficient
     'use_focal_loss': False,
 
-    # Focal Loss parameters (Option B only)
     'focal_gamma': 2.0,
     'focal_alpha': 1.0,
 
-    # Phase 1 — frozen base, train head only (warm-up)
+    # Phase 1 — frozen base, warm-up head
     'phase1_lr':     1e-3,
-    'phase1_epochs': 10,
+    'phase1_epochs': 15,       # increased from 10
 
-    # Phase 2 — fine-tune top 50 layers
-    'phase2_unfreeze_layers': 50,
+    # Phase 2 — deeper fine-tuning
+    'phase2_unfreeze_layers': 70,   # increased from 50 — captures more texture layers
     'phase2_lr_crossentropy': 1e-5,
     'phase2_lr_focal':        3e-5,
-    'phase2_epochs':          15,
+    'phase2_epochs':          20,   # increased from 15
+
+    # Label smoothing — reduces overconfidence, lowers loss scale
+    # High loss (2.33) with 51% accuracy = model is overconfident on wrong preds
+    'label_smoothing': 0.1,
 
     # Callbacks
-    'early_stop_patience':    10,
-    'reduce_lr_patience':     3,
+    'early_stop_patience':    12,   # more patience for texture learning
+    'reduce_lr_patience':     4,
     'reduce_lr_factor':       0.5,
-    'min_delta':              1e-3,
+    'min_delta':              5e-4, # smaller delta — catch slow improvements
 
-    # Gradient clipping
     'gradient_clip_norm':     1.0,
-
     'batch_size': 32,
-
-    # 4-class dataset paths
     'data_dir': 'preprocessed_4class',
 }
 
@@ -114,23 +111,24 @@ def get_loss_function(config):
     """
     Returns (loss_fn, use_class_weight) based on config.
 
-    Option A: CrossEntropy + class_weight
-    Option B: FocalLoss    + no class_weight
+    Option A: CrossEntropy with label smoothing + class_weight
+    Option B: FocalLoss + no class_weight
+
+    Label smoothing (0.1) addresses the high loss / overconfidence problem:
+    instead of training toward hard 0/1 targets, it trains toward
+    0.025 / 0.925 — the model is penalised for being too certain.
     """
+    smoothing = config.get('label_smoothing', 0.0)
     if config['use_focal_loss']:
-        loss_fn = FocalLoss(
-            gamma=config['focal_gamma'],
-            alpha=config['focal_alpha']
-        )
-        print(f"\nLoss: FocalLoss(gamma={config['focal_gamma']}, "
-              f"alpha={config['focal_alpha']})")
-        print("      class_weight: DISABLED (Focal Loss handles imbalance)")
-        return loss_fn, False   # False = don't use class_weight
+        loss_fn = FocalLoss(gamma=config['focal_gamma'], alpha=config['focal_alpha'])
+        print(f"\nLoss: FocalLoss(gamma={config['focal_gamma']}, alpha={config['focal_alpha']})")
+        print("      class_weight: DISABLED")
+        return loss_fn, False
     else:
-        loss_fn = 'categorical_crossentropy'
-        print("\nLoss: Categorical Cross-Entropy")
-        print("      class_weight: ENABLED (inverse-frequency)")
-        return loss_fn, True    # True = use class_weight
+        loss_fn = tf.keras.losses.CategoricalCrossentropy(label_smoothing=smoothing)
+        print(f"\nLoss: CategoricalCrossentropy(label_smoothing={smoothing})")
+        print("      class_weight: ENABLED (equal weights)")
+        return loss_fn, True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
