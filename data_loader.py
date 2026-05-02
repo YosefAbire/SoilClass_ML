@@ -62,12 +62,11 @@ def build_strong_aug():
         ),
 
         # Random sharpening — emphasises grain/texture edges
+        # Uses avg_pool on the image directly (already rank 4: B,H,W,C)
         layers.Lambda(
             lambda x: tf.clip_by_value(
                 x + tf.random.uniform([], 0.0, 0.25) * (
-                    x - tf.nn.avg_pool2d(
-                        tf.expand_dims(x, 0), ksize=3, strides=1, padding='SAME'
-                    )[0]
+                    x - tf.nn.avg_pool2d(x, ksize=3, strides=1, padding='SAME')
                 ), 0.0, 1.0
             ), name="random_sharpen"
         ),
