@@ -141,30 +141,23 @@ def build_texture_aug():
 
 # ── Main loader ───────────────────────────────────────────────────────────────
 def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32,
-                     use_mixup=True, mixup_alpha=0.3):
+                     use_mixup=False, mixup_alpha=0.3):
     """
     Builds tf.data pipelines for train / validation / test.
 
-    Pipeline order (training):
-      raw uint8 image
-        → cast to float32, divide by 255  →  [0, 1]
-        → augmentation (spatial + texture)  →  [0, 1]
-        → batch
-        → optional Mixup blending
-        → ImageNet normalisation  →  ~[-2.1, 2.6]
+    With equalised classes (480 each), uses a simple batched pipeline:
+      raw uint8 → [0,1] → augmentation → batch → repeat → ImageNet normalise → prefetch
 
-    Pipeline order (val / test):
-      raw uint8 image
-        → cast to float32, divide by 255  →  [0, 1]
-        → ImageNet normalisation  →  ~[-2.1, 2.6]
+    Val/Test: raw uint8 → [0,1] → ImageNet normalise → cache → prefetch
     """
+    AUTOTUNE = tf.data.AUTOTUNE
 
     # ── Load datasets ─────────────────────────────────────────────────────────
     train_ds_raw = tf.keras.utils.image_dataset_from_directory(
         f"{data_dir}/train",
         label_mode='categorical',
         image_size=target_size,
-        batch_size=None,          # unbatched — needed for per-class filtering
+        batch_size=batch_size,
         shuffle=True,
         seed=42
     )
@@ -184,96 +177,31 @@ def get_data_loaders(data_dir, target_size=(224, 224), batch_size=32,
     )
 
     class_names = train_ds_raw.class_names
-    n_classes   = len(class_names)
     train_dir   = f"{data_dir}/train"
-
-    counts = np.array([
-        len(os.listdir(os.path.join(train_dir, cls)))
-        for cls in class_names
-    ], dtype=np.float32)
-    max_count = counts.max()
+    counts = {cls: len(os.listdir(os.path.join(train_dir, cls)))
+              for cls in class_names}
 
     print("\nDataset class counts:")
-    for cls, n in zip(class_names, counts):
-        tag = " ← minority (oversample + texture aug)" if cls in MINORITY_CLASSES else ""
-        print(f"  {cls:14}: {int(n):4d} images{tag}")
+    for cls, n in counts.items():
+        print(f"  {cls:14}: {n:4d} images")
 
     standard_aug = build_standard_aug()
-    texture_aug  = build_texture_aug()
-    AUTOTUNE     = tf.data.AUTOTUNE
 
-    # ── Per-class oversampling + augmentation ─────────────────────────────────
-    class_datasets = []
-    for i, cls in enumerate(class_names):
-        is_minority = cls in MINORITY_CLASSES
-        aug_fn      = texture_aug if is_minority else standard_aug
+    def preprocess_train(image, label):
+        image = tf.cast(image, tf.float32) / 255.0
+        image = standard_aug(image, training=True)
+        image = (image - IMAGENET_MEAN) / IMAGENET_STD
+        return image, label
 
-        # Filter to this class only
-        cls_ds = train_ds_raw.filter(
-            lambda x, y, idx=i: tf.equal(tf.argmax(y), idx)
-        )
-
-        # Step 1: cast to float32 and scale to [0, 1]
-        # Augmentation must operate on [0,1] before ImageNet normalisation
-        cls_ds = cls_ds.map(
-            lambda x, y: (tf.cast(x, tf.float32) / 255.0, y),
-            num_parallel_calls=AUTOTUNE
-        )
-
-        if is_minority:
-            # Repeat so minority class reaches ~max_count virtual samples.
-            # Shuffle BEFORE repeat → each pass sees a different image order.
-            # Augmentation AFTER repeat → every copy gets fresh random transforms.
-            repeat_factor = int(np.ceil(max_count / counts[i]))
-            print(f"  {cls:14}: repeat×{repeat_factor} "
-                  f"→ ~{int(counts[i]*repeat_factor)} virtual samples")
-            cls_ds = (cls_ds
-                      .shuffle(int(counts[i]), reshuffle_each_iteration=True)
-                      .repeat(repeat_factor)
-                      .map(lambda x, y: (aug_fn(x, training=True), y),
-                           num_parallel_calls=AUTOTUNE))
-        else:
-            cls_ds = (cls_ds
-                      .shuffle(int(counts[i]), reshuffle_each_iteration=True)
-                      .map(lambda x, y: (aug_fn(x, training=True), y),
-                           num_parallel_calls=AUTOTUNE))
-
-        class_datasets.append(cls_ds)
-
-    # Interleave all class streams with equal probability
-    train_ds = tf.data.Dataset.sample_from_datasets(
-        class_datasets,
-        weights=[1.0 / n_classes] * n_classes,
-        seed=42,
-        stop_on_empty_dataset=False
-    )
-
-    # Step 2: batch
-    train_ds = train_ds.batch(batch_size)
-
-    # Step 3: optional Mixup (operates on batched [0,1] images)
-    if use_mixup:
-        train_ds = train_ds.map(
-            lambda x, y: mixup_batch(x, y, alpha=mixup_alpha),
-            num_parallel_calls=AUTOTUNE
-        )
-
-    # Step 4: repeat — makes the dataset an infinite stream so model.fit
-    # can pull exactly steps_per_epoch batches every epoch without hitting
-    # end-of-dataset and skipping even-numbered epochs.
-    train_ds = train_ds.repeat()
-
-    # Step 5: ImageNet normalisation — MUST be last, after all augmentation
-    train_ds = train_ds.map(
-        lambda x, y: ((x - IMAGENET_MEAN) / IMAGENET_STD, y),
-        num_parallel_calls=AUTOTUNE
-    ).prefetch(AUTOTUNE)
-
-    # ── Eval pipelines: normalise only, no augmentation ───────────────────────
     def preprocess_eval(image, label):
-        """Scale to [0,1] then apply ImageNet normalisation."""
         image = tf.cast(image, tf.float32) / 255.0
         return (image - IMAGENET_MEAN) / IMAGENET_STD, label
+
+    # Training: augment → repeat (infinite stream) → prefetch
+    train_ds = (train_ds_raw
+                .map(preprocess_train, num_parallel_calls=AUTOTUNE)
+                .repeat()
+                .prefetch(AUTOTUNE))
 
     val_ds = (val_ds
               .map(preprocess_eval, num_parallel_calls=AUTOTUNE)
