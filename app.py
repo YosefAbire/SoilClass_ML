@@ -270,7 +270,7 @@ def chart_style(fig, ax):
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(f"<h2 style='color:#FFD9A0;margin:0 0 2px 0'>🌱 SoilClass ML</h2>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color:#E8C99A;font-size:13px;margin:0'>MobileNetV2 · 5 soil types</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:#E8C99A;font-size:13px;margin:0'>MobileNetV2 · 4 soil types</p>", unsafe_allow_html=True)
     st.divider()
     page = st.radio("", [
         "🏠  Overview",
@@ -296,7 +296,7 @@ if page == "🏠  Overview":
 
     counts = dataset_counts()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Soil Classes",      "5")
+    c1.metric("Soil Classes",      "4")
     c2.metric("Training Images",   f"{sum(v.get('train',0) for v in counts.values()):,}")
     c3.metric("Validation Images", f"{sum(v.get('validation',0) for v in counts.values()):,}")
     c4.metric("Test Images",       f"{sum(v.get('test',0) for v in counts.values()):,}")
@@ -317,16 +317,17 @@ if page == "🏠  Overview":
 """)
         st.subheader("Training Strategy")
         st.markdown(f"""
-- **Phase 1** — Frozen base, train head `Adam lr=0.001`
-- **Phase 2** — Unfreeze top 20 layers `Adam lr=0.0001`
-- **Callbacks** — EarlyStopping (patience=5) + ModelCheckpoint
+- **Phase 1** — Frozen base, train head `Adam lr=0.001`, 10 epochs
+- **Phase 2** — Unfreeze top 50 layers `Adam lr=0.00001`, 15 epochs
+- **Loss** — Categorical Cross-Entropy (classes are balanced)
+- **Callbacks** — EarlyStopping (patience=10) + ModelCheckpoint + ReduceLROnPlateau
 """)
 
     with col2:
         st.subheader("Pipeline")
         st.code("""\
-split_data.py          → train / val / test split
-preprocess_dataset.py  → blur + histogram equalization
+prepare_4class.py      → equalise 4 classes at 480 each, exclude arid
+preprocess_dataset.py  → CLAHE on L channel (LAB space)
 train.py               → two-phase transfer learning
 evaluate.py            → metrics + confusion matrix
 predict.py             → CLI single-image inference
@@ -334,8 +335,10 @@ app.py                 → this Streamlit UI""", language="text")
         st.subheader("Input Preprocessing")
         st.markdown("""
 - Resize to **224 × 224 px**
-- Normalize pixels to **[0, 1]**
-- Augmentation *(train only)*: flip · rotation ±20° · zoom ±20° · translate ±10%
+- **CLAHE** on L channel (LAB space) — preserves colour, enhances contrast
+- ImageNet normalisation: `(x/255 - mean) / std`
+- Augmentation *(train only)*: flip · rotation ±20° · zoom ±15° · translate ±10%
+- Dataset: **480 images per class** (perfectly balanced, arid excluded)
 """)
 
     if os.path.exists(TRAIN_PLOT):
@@ -371,6 +374,10 @@ elif page == "🔍  Classify Image":
                         model  = load_model()
                         labels = load_labels()
                         arr    = np.array(img.convert('RGB').resize((224, 224)), dtype=np.float32) / 255.0
+                        # ImageNet normalisation — must match training pipeline
+                        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                        arr  = (arr - mean) / std
                         probs  = model.predict(np.expand_dims(arr, 0), verbose=0)[0]
                         idx    = int(np.argmax(probs))
                         st.session_state['soil_result'] = {
@@ -487,8 +494,10 @@ elif page == "📊  Evaluation":
             label_mode='categorical', image_size=(224, 224), batch_size=32, shuffle=False
         )
         AUTOTUNE = tf.data.AUTOTUNE
+        IMAGENET_MEAN = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
+        IMAGENET_STD  = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
         test_ds = test_ds.map(
-            lambda x, y: (tf.cast(x, tf.float32) / 255.0, y),
+            lambda x, y: ((tf.cast(x, tf.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD, y),
             num_parallel_calls=AUTOTUNE
         ).prefetch(AUTOTUNE)
         preds  = model.predict(test_ds, verbose=0)
