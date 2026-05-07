@@ -1,0 +1,740 @@
+================================================================================
+SOIL CLASSIFICATION SYSTEM — COMPLETE TECHNICAL DOCUMENTATION
+MobileNetV2 Transfer Learning | 4 Classes | TensorFlow/Keras
+================================================================================
+
+Project: SoilClass ML
+Classes: Alluvial, Black, Red, Yellow  (Arid removed — spectral noise)
+Model:   MobileNetV2 (ImageNet pretrained) + custom classification head
+Accuracy: ~51% (baseline), target 60-80% with full pipeline
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+  1.  Project Overview
+  2.  File Structure
+  3.  Prerequisites & Installation
+  4.  Step 1 — Dataset Preparation (prepare_4class.py)
+  5.  Step 2 — Data Audit & Cleaning (verify_data.py / clean_dataset.py)
+  6.  Step 3 — Image Preprocessing (preprocess_dataset.py)
+  7.  Step 4 — Data Loading Pipeline (data_loader.py)
+  8.  Step 5 — Model Architecture (model.py)
+  9.  Step 6 — Loss Function (losses.py)
+  10. Step 7 — Training (train.py)
+  11. Step 8 — Evaluation (evaluate.py)
+  12. Step 9 — Single Image Prediction (predict.py)
+  13. Step 10 — Grad-CAM Visualisation (main_gradcam.py)
+  14. Step 11 — Streamlit Web App (app.py)
+  15. Step 12 — Jupyter Notebook (SoilClassification.ipynb)
+  16. Configuration Reference
+  17. Troubleshooting
+  18. Complete Run Order
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+This system classifies soil images into 4 types using transfer learning on
+MobileNetV2. The pipeline covers the full ML workflow:
+
+  Raw images → Dataset equalisation → CLAHE preprocessing → Training
+  → Evaluation → Grad-CAM analysis → Streamlit web UI
+
+Key design decisions:
+  - Arid class removed: visually too similar to Red, caused class collapse
+  - All 4 classes equalised to 480 train / 102 val / 101 test images each
+  - CLAHE preprocessing preserves colour (critical for soil discrimination)
+  - ImageNet normalisation aligns input with MobileNetV2 pre-training
+  - Two-phase training: head warmup then deep fine-tuning
+
+================================================================================
+2. FILE STRUCTURE
+================================================================================
+
+soil-classification-system/
+  prepare_4class.py         Builds equalised 4-class dataset from raw data
+  verify_data.py            Audits dataset for duplicates, low-res, bad images
+  clean_dataset.py          Removes flagged bad images
+  preprocess_dataset.py     Applies CLAHE to all images
+  data_loader.py            tf.data pipeline with augmentation
+  model.py                  MobileNetV2 architecture definition
+  losses.py                 FocalLoss class (custom Keras loss)
+  train.py                  Two-phase training pipeline
+  evaluate.py               Test set evaluation + artifact generation
+  predict.py                CLI single-image inference
+  main_gradcam.py           Grad-CAM heatmap visualisation
+  gradcam.py                Grad-CAM core functions
+  utils.py                  Image preprocessing utilities
+  app.py                    Streamlit web application
+  SoilClassification.ipynb  Jupyter notebook (full pipeline inline)
+  class_indices.json        Class name to index mapping (auto-generated)
+  requirements.txt          Python dependencies
+
+  soil_dataset/             Original raw images (5 classes including arid)
+  soil_dataset_4class/      Equalised 4-class dataset (generated)
+  preprocessed_4class/      CLAHE-processed images (generated)
+  soil_classifier_initial.keras  Phase 1 checkpoint (generated)
+  soil_classifier_final.keras    Final trained model (generated)
+  training_plots.png        Accuracy/loss curves (generated)
+
+================================================================================
+3. PREREQUISITES & INSTALLATION
+================================================================================
+
+Python version: 3.11 recommended
+
+Install all dependencies:
+
+  pip install tensorflow numpy matplotlib scikit-learn pillow seaborn
+  pip install opencv-python streamlit jupyter
+
+Verify TensorFlow:
+
+  python -c "import tensorflow as tf; print(tf.__version__)"
+
+NOTE: This project runs on CPU (Windows). GPU is not required but will
+significantly speed up training if available.
+
+================================================================================
+4. STEP 1 — DATASET PREPARATION
+================================================================================
+
+File: prepare_4class.py
+
+PURPOSE:
+  Builds a perfectly equalised 4-class dataset from the original soil_dataset/.
+  Excludes the Arid class entirely and caps all remaining classes to the
+  minimum count so every class has exactly the same number of images.
+
+EQUALISATION STRATEGY:
+  - Find the minimum image count across all 4 classes per split
+  - Randomly sample that many images from each class
+  - Result: all classes have identical counts (no bias)
+
+DATASET COUNTS AFTER EQUALISATION:
+  Train      : 480 per class  (1,920 total)
+  Validation : 102 per class  (408 total)
+  Test       : 101 per class  (404 total)
+  Grand total: 2,732 images
+
+USAGE:
+  python prepare_4class.py              # first run
+  python prepare_4class.py --force      # rebuild (deletes existing output)
+
+OUTPUT:
+  soil_dataset_4class/
+    train/      alluvial/ black/ red/ yellow/
+    validation/ alluvial/ black/ red/ yellow/
+    test/       alluvial/ black/ red/ yellow/
+
+NOTE: The original soil_dataset/ is never modified. Run only once unless
+you want to re-sample with a different random seed.
+
+================================================================================
+5. STEP 2 — DATA AUDIT & CLEANING
+================================================================================
+
+Files: verify_data.py, clean_dataset.py
+
+PURPOSE:
+  Detects and removes three categories of bad images that hurt model accuracy:
+  1. Cross-split duplicates (data leakage) — same image in train AND test
+  2. Low-resolution images (below 224x224) — MobileNetV2 cannot use them
+  3. Mono-colour suspicious images (>90% single colour) — not real soil photos
+
+AUDIT:
+  python verify_data.py
+
+  Output: data_audit_report.txt with full list of issues found.
+
+CLEAN:
+  python clean_dataset.py              # dry run — shows what would be deleted
+  python clean_dataset.py --execute    # actually deletes flagged files
+
+WHAT GETS DELETED:
+  - Cross-split duplicates: val/test copy removed, train copy kept
+  - Same-split duplicates: first occurrence kept, rest removed
+  - Low-resolution: deleted entirely
+  - Mono-colour: deleted entirely
+
+NOTE: Run audit and clean on soil_dataset_4class/ AFTER prepare_4class.py.
+The equalised dataset was already cleaned from the original, but re-auditing
+confirms no issues remain.
+
+================================================================================
+6. STEP 3 — IMAGE PREPROCESSING
+================================================================================
+
+File: preprocess_dataset.py
+
+PURPOSE:
+  Applies CLAHE (Contrast Limited Adaptive Histogram Equalization) to every
+  image to enhance local contrast while preserving colour information.
+
+WHY CLAHE (NOT GLOBAL HISTOGRAM EQUALIZATION):
+  - Global equalization redistributes ALL pixel intensities uniformly
+  - This destroys colour — red soil and yellow soil look identical after it
+  - CLAHE only enhances the L (luminance) channel in LAB colour space
+  - The A and B channels (colour) are completely untouched
+  - Result: better contrast for texture features, colour preserved
+
+WHY NO GAUSSIAN BLUR:
+  - Blur softens texture edges
+  - Texture (grain size, surface roughness) is the primary discriminating
+    feature between soil types
+  - Removing blur preserves the texture information the model needs
+
+PIPELINE PER IMAGE:
+  1. Read image with OpenCV (BGR format)
+  2. Convert BGR → LAB colour space
+  3. Split into L, A, B channels
+  4. Apply CLAHE to L channel only (clipLimit=2.0, tileGridSize=8x8)
+  5. Merge L, A, B back together
+  6. Convert LAB → BGR
+  7. Save to output directory
+
+USAGE:
+  python preprocess_dataset.py
+  # Uses defaults: input=soil_dataset_4class, output=preprocessed_4class
+
+  python preprocess_dataset.py --input soil_dataset_4class --output preprocessed_4class
+
+  # If OpenCV not installed, falls back to PIL (no CLAHE, just copies images)
+  pip install opencv-python   # recommended
+
+OUTPUT:
+  preprocessed_4class/
+    train/      alluvial/ black/ red/ yellow/
+    validation/ alluvial/ black/ red/ yellow/
+    test/       alluvial/ black/ red/ yellow/
+
+NOTE: Run only once. If you need to reprocess, delete preprocessed_4class/
+first and re-run.
+
+================================================================================
+7. STEP 4 — DATA LOADING PIPELINE
+================================================================================
+
+File: data_loader.py
+
+PURPOSE:
+  Builds optimised tf.data pipelines for training, validation, and test sets.
+  Handles augmentation, normalisation, and infinite streaming for training.
+
+TRAINING PIPELINE ORDER:
+  raw uint8 image [0, 255]
+    → cast to float32, divide by 255  →  [0.0, 1.0]
+    → standard augmentation           →  [0.0, 1.0]
+    → ImageNet normalisation           →  ~[-2.1, 2.6]
+    → .repeat() (infinite stream)
+    → .prefetch(AUTOTUNE)
+
+VALIDATION / TEST PIPELINE ORDER:
+  raw uint8 image [0, 255]
+    → cast to float32, divide by 255  →  [0.0, 1.0]
+    → ImageNet normalisation           →  ~[-2.1, 2.6]
+    → .cache() (loaded once, reused)
+    → .prefetch(AUTOTUNE)
+
+IMAGENET NORMALISATION:
+  Formula: x_norm = (x / 255 - mean) / std
+  Mean: [0.485, 0.456, 0.406]  (per RGB channel)
+  Std:  [0.229, 0.224, 0.225]  (per RGB channel)
+
+  WHY: MobileNetV2 was pretrained on ImageNet with these statistics.
+  Feeding unnormalised images shifts the input distribution away from what
+  the base model's learned filters expect, reducing transfer learning quality.
+
+AUGMENTATION (training only):
+  RandomFlip          horizontal and vertical
+  RandomRotation      ±20 degrees
+  RandomZoom          ±15%
+  RandomTranslation   ±10% height and width
+  RandomBrightness    ±10%
+  RandomContrast      ±10%
+
+  NOTE: Narrow brightness/contrast range (0.10) is intentional.
+  The model should learn texture, not lighting conditions.
+
+.repeat() EXPLANATION:
+  The training dataset is made infinite with .repeat(). This is required
+  because steps_per_epoch is set explicitly in model.fit(). Without .repeat(),
+  the dataset runs out after one epoch and Keras skips even-numbered epochs.
+
+KEY FUNCTION:
+  get_data_loaders(data_dir, target_size=(224,224), batch_size=32)
+  Returns: (train_ds, val_ds, test_ds, class_names)
+
+================================================================================
+8. STEP 5 — MODEL ARCHITECTURE
+================================================================================
+
+File: model.py
+
+BASE MODEL:
+  MobileNetV2 pretrained on ImageNet
+  - include_top=False (removes original 1000-class classifier)
+  - input_shape=(224, 224, 3)
+  - Frozen during Phase 1, partially unfrozen during Phase 2
+
+CLASSIFICATION HEAD:
+  GlobalAveragePooling2D    (7,7,1280) → (1280,)
+  BatchNormalization        normalises backbone feature distribution
+  Dense(128, relu)          with L2 regularisation (1e-4)
+  Dropout(0.3)              conservative — prevents underfitting
+  Dense(4, softmax)         4-class output
+
+TOTAL PARAMETERS:
+  ~2.4 million total
+  ~167,000 trainable in Phase 1 (head only)
+  ~500,000+ trainable in Phase 2 (top 50 layers + head)
+
+WHY BATCHNORM AFTER GAP:
+  The 1280 channels from GAP can have very different scales.
+  BatchNorm immediately after GAP normalises this before the Dense layer,
+  making training more stable — especially important with small datasets.
+
+WHY DROPOUT(0.3) NOT HIGHER:
+  Aggressive dropout (>0.4) on datasets with <1000 samples per class
+  causes underfitting. 0.3 provides regularisation without hurting capacity.
+
+WHY L2 REGULARISATION:
+  Adds weight decay independent of dropout — a second regularisation axis
+  that helps the model generalise to minority classes.
+
+IMPORTANT — DO NOT LOAD OLD 5-CLASS MODEL:
+  The old soil_classifier_final.keras has 5 output neurons.
+  The new model has 4. Loading the old model and using the new class_indices.json
+  causes class collapse (everything predicted as one class).
+  Always run python train.py to build a fresh model.
+
+KEY FUNCTIONS:
+  build_model(num_classes=4)
+    Returns: (model, base_model)
+
+  unfreeze_top_layers(base_model, n_layers=50)
+    Unfreezes top N layers, keeps ALL BatchNorm frozen.
+    BatchNorm in the base must stay frozen — unfreezing it with small
+    batches corrupts the running statistics from ImageNet training.
+
+================================================================================
+9. STEP 6 — LOSS FUNCTION
+================================================================================
+
+File: losses.py
+
+TWO OPTIONS (switchable in train.py via use_focal_loss flag):
+
+OPTION A — Categorical Cross-Entropy + class_weight (DEFAULT):
+  Loss: standard categorical_crossentropy
+  Class weights: equal (1.0 each) — dataset is balanced
+  Recommended: when dataset is balanced (current setup)
+
+  Formula: L = -sum(y_i * log(y_hat_i))
+
+OPTION B — Focal Loss (no class_weight):
+  Loss: FocalLoss(gamma=2.0, alpha=1.0)
+  Class weights: disabled
+  Recommended: when minority classes are severely underrepresented
+
+  Formula: FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+
+  gamma=2.0: down-weights easy examples, focuses on hard/misclassified ones
+  alpha=1.0: correct scale for multi-class (0.25 is binary detection default)
+
+  WHY NOT BOTH: Using Focal Loss AND class_weight simultaneously
+  double-counts the imbalance correction, causing gradient instability
+  and preventing convergence. Use one or the other, never both.
+
+CUSTOM OBJECTS:
+  When loading a model trained with FocalLoss, pass custom_objects:
+  tf.keras.models.load_model(path, custom_objects={'FocalLoss': FocalLoss})
+
+================================================================================
+10. STEP 7 — TRAINING
+================================================================================
+
+File: train.py
+
+TWO-PHASE TRAINING STRATEGY:
+
+PHASE 1 — Head Warmup (base frozen):
+  Purpose: Train only the classification head while the base is frozen.
+           This prevents the randomly-initialised head from corrupting
+           the pretrained ImageNet features in the base.
+  LR:      1e-3 (high — safe because only the small head is updated)
+  Epochs:  10 (max, EarlyStopping may stop earlier)
+  Saves:   soil_classifier_initial.keras
+
+PHASE 2 — Deep Fine-Tuning (top 50 layers unfrozen):
+  Purpose: Fine-tune the upper layers of MobileNetV2 to adapt ImageNet
+           features to soil-specific textures and patterns.
+  LR:      1e-5 (very low — prevents catastrophic forgetting)
+  Epochs:  15 (max, EarlyStopping may stop earlier)
+  Saves:   soil_classifier_final.keras
+
+  WHY KEEP BATCHNORM FROZEN IN PHASE 2:
+  BatchNorm layers accumulate running mean/variance statistics during
+  ImageNet training. Fine-tuning with batch_size=32 on a small dataset
+  would corrupt these statistics, destabilising the entire base model.
+  All BatchNorm layers in the base remain frozen regardless of n_unfreeze.
+
+CALLBACKS (both phases):
+  EarlyStopping:    monitor=val_accuracy, patience=10, min_delta=0.001
+  ModelCheckpoint:  saves best val_accuracy checkpoint
+  ReduceLROnPlateau: halves LR when val_accuracy plateaus for 3 epochs
+
+  WHY val_accuracy NOT val_loss:
+  Focal Loss values are very small (~0.001-0.05). Absolute changes in
+  val_loss don't reliably reflect accuracy improvements. val_accuracy
+  is the metric that actually matters.
+
+GRADIENT CLIPPING:
+  Adam optimizer uses clipnorm=1.0 in both phases.
+  Prevents exploding gradients when unfreezing many layers simultaneously.
+
+STEPS PER EPOCH:
+  Calculated as: total_train_images // batch_size
+  Set explicitly in model.fit() because the training dataset uses .repeat()
+  (infinite stream). Without steps_per_epoch, Keras cannot determine when
+  one epoch ends.
+
+USAGE:
+  python train.py              # full training (Phase 1 + Phase 2)
+  python train.py --finetune   # Phase 2 only (loads existing model)
+
+OUTPUTS:
+  soil_classifier_initial.keras   best Phase 1 checkpoint
+  soil_classifier_final.keras     best Phase 2 checkpoint
+  class_indices.json              class name to index mapping
+  training_plots.png              accuracy and loss curves
+
+SWITCHING LOSS MODE:
+  Edit TRAIN_CONFIG in train.py:
+    'use_focal_loss': False   # Option A: CrossEntropy (default)
+    'use_focal_loss': True    # Option B: Focal Loss
+
+================================================================================
+11. STEP 8 — EVALUATION
+================================================================================
+
+File: evaluate.py
+
+PURPOSE:
+  Evaluates the trained model on the test set and generates all
+  performance artifacts needed for project documentation.
+
+USAGE:
+  python evaluate.py
+
+OUTPUTS:
+  final_confusion_matrix.png        4x4 confusion matrix (raw counts)
+  final_confusion_matrix_norm.png   4x4 normalised confusion matrix
+                                    (shows per-class recall at a glance)
+  final_precision_recall_curves.png PR curve per class with Average Precision
+  final_f1_summary.png              F1 bar chart + precision/recall/F1 table
+
+  Console output:
+    Test Accuracy
+    Test Loss
+    Full classification report (precision, recall, F1, support per class)
+    Macro F1 and Weighted F1
+
+HOW TO READ THE CONFUSION MATRIX:
+  Rows = True labels, Columns = Predicted labels
+  Diagonal = correct predictions
+  Off-diagonal = misclassifications
+  Normalised version shows what fraction of each true class was predicted
+  correctly (= recall per class)
+
+HOW TO READ PRECISION-RECALL CURVES:
+  High area under curve = good discriminability for that class
+  AP (Average Precision) summarises the curve in one number
+  A random classifier has AP = 0.25 for 4 balanced classes
+
+================================================================================
+12. STEP 9 — SINGLE IMAGE PREDICTION
+================================================================================
+
+File: predict.py
+
+PURPOSE:
+  Runs inference on a single image file from the command line.
+
+USAGE:
+  python predict.py path/to/image.jpg
+  python predict.py path/to/image.jpg --json   # JSON output for web app
+
+PREPROCESSING (must match training):
+  1. Load image, resize to 224x224
+  2. Convert to float32, divide by 255
+  3. Apply ImageNet normalisation: (x - mean) / std
+  4. Add batch dimension: shape (1, 224, 224, 3)
+  5. Run model.predict()
+
+OUTPUT:
+  {
+    "class": "alluvial",
+    "confidence": 0.8234,
+    "probabilities": {
+      "alluvial": 0.8234,
+      "black":    0.0891,
+      "red":      0.0612,
+      "yellow":   0.0263
+    }
+  }
+
+================================================================================
+13. STEP 10 — GRAD-CAM VISUALISATION
+================================================================================
+
+Files: main_gradcam.py, gradcam.py, utils.py
+
+PURPOSE:
+  Generates heatmaps showing WHICH regions of each image the model focused
+  on when making its prediction. Used to diagnose misclassifications and
+  verify the model is learning texture, not background artefacts.
+
+HOW GRAD-CAM WORKS:
+  1. Forward pass: compute activations at the last convolutional layer
+  2. Backward pass: compute gradients of the predicted class score
+     with respect to those activations
+  3. Global average pool the gradients to get channel importance weights
+  4. Weighted sum of activation maps = heatmap
+  5. Overlay heatmap on original image
+
+USAGE:
+  python main_gradcam.py                    # 2 images per class, auto-sampled
+  python main_gradcam.py --image path.jpg   # single image
+  python main_gradcam.py --final            # saves to final_explanations/
+
+OUTPUT:
+  gradcam_outputs/     standard analysis outputs
+  final_explanations/  "after" balanced model outputs (use --final flag)
+
+  Each output image shows:
+    Left:   original image with true label
+    Middle: Grad-CAM heatmap overlay (green border = correct, red = wrong)
+    Right:  probability bar chart for all 4 classes
+
+INTERPRETING RESULTS:
+  Good model: heatmap highlights soil texture/grain patterns
+  Bad model:  heatmap highlights image borders, background, or uniform areas
+
+================================================================================
+14. STEP 11 — STREAMLIT WEB APP
+================================================================================
+
+File: app.py
+
+PURPOSE:
+  Interactive web interface for the soil classification system.
+  Provides 5 pages accessible from the sidebar.
+
+LAUNCH:
+  streamlit run app.py
+
+  Opens at: http://localhost:8501
+
+PAGES:
+
+  Overview
+    - Model architecture summary (MobileNetV2 + head)
+    - Training strategy (Phase 1 + Phase 2)
+    - Pipeline description
+    - Training history plot (if training_plots.png exists)
+    - Dataset statistics (total images per split)
+
+  Classify Image
+    - Upload a JPG/PNG soil image
+    - Click "Run Classification"
+    - Shows: predicted class, confidence gauge, probability breakdown
+    - Shows: crop recommendations for the predicted soil type
+      (best crops, also suitable, crops to avoid, farming tips)
+
+  Evaluation
+    - Click "Run Evaluation" to evaluate on the full test set
+    - Shows: accuracy, loss, macro F1, weighted F1
+    - Shows: confusion matrix (raw + normalised)
+    - Shows: per-class metrics table
+    - Shows: per-class F1 bar chart
+    - Results are cached after first run
+
+  Dataset
+    - Image count table per class per split
+    - Stacked bar chart (distribution by split)
+    - Donut chart (training set class balance)
+    - Sample image per class
+
+  Hyperparameters
+    - All training hyperparameters used
+    - Evaluation metrics tracked
+    - Suggested future improvements
+
+IMPORTANT — PREPROCESSING IN THE APP:
+  The Classify Image page applies the same preprocessing as training:
+    arr = np.array(img.resize((224,224)), dtype=np.float32) / 255.0
+    mean = [0.485, 0.456, 0.406]
+    std  = [0.229, 0.224, 0.225]
+    arr  = (arr - mean) / std
+
+  The Evaluation page also applies ImageNet normalisation to the test set.
+  If these don't match the training pipeline, predictions will be wrong.
+
+MODEL LOADING:
+  The app loads soil_classifier_final.keras with FocalLoss as a custom object.
+  If the model was trained with CrossEntropy, FocalLoss is still imported
+  but not used — this is safe.
+
+================================================================================
+15. STEP 12 — JUPYTER NOTEBOOK
+================================================================================
+
+File: SoilClassification.ipynb
+
+PURPOSE:
+  Self-contained notebook that reproduces the entire pipeline inline.
+  No external .py files needed — all functions are defined in cells.
+
+LAUNCH:
+  jupyter notebook SoilClassification.ipynb
+
+CELL OVERVIEW:
+  Cell 1   Install packages, imports, CPU setup
+  Cell 2   Configuration (paths, epochs, LR, classes)
+  Cell 3   Dataset audit (duplicates, low-res, mono-colour)
+  Cell 4   Clean dataset (remove bad images)
+  Cell 5   Dataset distribution charts
+  Cell 6   CLAHE preprocessing
+  Cell 7   Original vs CLAHE comparison
+  Cell 8   FocalLoss class definition
+  Cell 9   Class weights + steps_per_epoch
+  Cell 10  tf.data pipeline (augmentation + normalisation)
+  Cell 11  Build MobileNetV2 model
+  Cell 12  Phase 1 training (frozen base)
+  Cell 13  Phase 2 fine-tuning (top 50 layers)
+  Cell 14  Training history plot
+  Cell 15  Evaluate on test set
+  Cell 16  Classification report
+  Cell 17  Confusion matrices
+  Cell 18  Per-class F1 chart
+  Cell 19  Single image prediction
+  Cell 20  Grad-CAM visualisation
+  Cell 21  Streamlit launch instructions
+
+RUN ORDER: Execute cells 1 through 21 in sequence.
+Cells 3-4 (audit/clean) and Cell 6 (preprocessing) only need to run once.
+
+================================================================================
+16. CONFIGURATION REFERENCE
+================================================================================
+
+All training settings are in TRAIN_CONFIG in train.py:
+
+  use_focal_loss          False = CrossEntropy (default), True = Focal Loss
+  focal_gamma             2.0 (focusing parameter for Focal Loss)
+  focal_alpha             1.0 (scale factor — must be 1.0 for multi-class)
+  phase1_lr               1e-3 (head warmup learning rate)
+  phase1_epochs           10 (max epochs for Phase 1)
+  phase2_unfreeze_layers  50 (MobileNetV2 layers to unfreeze in Phase 2)
+  phase2_lr_crossentropy  1e-5 (Phase 2 LR when using CrossEntropy)
+  phase2_lr_focal         3e-5 (Phase 2 LR when using Focal Loss)
+  phase2_epochs           15 (max epochs for Phase 2)
+  early_stop_patience     10 (epochs without improvement before stopping)
+  reduce_lr_patience      3 (epochs before halving LR)
+  reduce_lr_factor        0.5 (LR multiplier on plateau)
+  min_delta               1e-3 (minimum improvement to count as progress)
+  gradient_clip_norm      1.0 (Adam clipnorm)
+  batch_size              32
+  data_dir                preprocessed_4class
+
+================================================================================
+17. TROUBLESHOOTING
+================================================================================
+
+PROBLEM: "Could not locate class FocalLoss"
+CAUSE:   Model was saved with FocalLoss but it's not imported before loading.
+FIX:     from losses import FocalLoss
+         model = tf.keras.models.load_model(path, custom_objects={'FocalLoss': FocalLoss})
+
+PROBLEM: Model predicts the same class for everything (class collapse)
+CAUSE:   Loading old 5-class model with new 4-class class_indices.json.
+         The output neuron indices no longer match the class names.
+FIX:     Run python train.py to build a fresh 4-class model from scratch.
+
+PROBLEM: "UserWarning: Your input ran out of data"
+CAUSE:   Training dataset is finite but steps_per_epoch is set.
+FIX:     data_loader.py uses .repeat() — the dataset is infinite.
+         If this warning appears, check that .repeat() is in the pipeline.
+
+PROBLEM: "Shape must be rank 4 but is rank 5" in augmentation
+CAUSE:   A Lambda layer uses tf.expand_dims(x, 0) on a batched input.
+         The input is already (batch, H, W, C) — adding dim 0 makes it rank 5.
+FIX:     Remove tf.expand_dims. Pass x directly to tf.nn.avg_pool2d.
+
+PROBLEM: "Inter op parallelism cannot be modified after initialization"
+CAUSE:   tf.config.threading calls are inside a function, called after TF init.
+FIX:     Move threading config to module level, before any TF imports.
+
+PROBLEM: High loss (>2.0) with moderate accuracy
+CAUSE:   Model is overconfident on wrong predictions.
+FIX:     Add label smoothing: CategoricalCrossentropy(label_smoothing=0.1)
+
+PROBLEM: Preprocessing mismatch (wrong predictions in app)
+CAUSE:   Training used ImageNet normalisation but inference uses plain /255.
+FIX:     Apply (x/255 - mean) / std in ALL inference paths (app, predict.py).
+
+PROBLEM: "ValueError: Exception encountered when calling Lambda.call()"
+CAUSE:   Lambda layer in augmentation pipeline has a shape mismatch.
+FIX:     Check that Lambda functions handle batched input (rank 4, not rank 3).
+
+================================================================================
+18. COMPLETE RUN ORDER
+================================================================================
+
+First time setup:
+
+  1. Install dependencies
+     pip install tensorflow numpy matplotlib scikit-learn pillow seaborn
+     pip install opencv-python streamlit jupyter
+
+  2. Prepare equalised 4-class dataset
+     python prepare_4class.py
+
+  3. Audit the dataset (optional but recommended)
+     python verify_data.py
+
+  4. Clean bad images (optional)
+     python clean_dataset.py --execute
+
+  5. Apply CLAHE preprocessing
+     python preprocess_dataset.py --input soil_dataset_4class --output preprocessed_4class
+
+  6. Train the model (takes 30-90 minutes on CPU)
+     python train.py
+
+  7. Evaluate the model
+     python evaluate.py
+
+  8. Run Grad-CAM analysis
+     python main_gradcam.py
+
+  9. Launch the web app
+     streamlit run app.py
+
+Subsequent runs (model already trained):
+
+  - Evaluate only:    python evaluate.py
+  - Predict one image: python predict.py path/to/image.jpg
+  - Grad-CAM:         python main_gradcam.py
+  - Web app:          streamlit run app.py
+  - Fine-tune only:   python train.py --finetune
+
+Jupyter notebook (alternative to scripts):
+
+  jupyter notebook SoilClassification.ipynb
+  Run cells 1 through 21 in order.
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
